@@ -1,6 +1,8 @@
 # ICESat-2 Retreat Framework
 
-![Alt text](Book/Pictures/bluff.png)
+<p align="center">
+	<img src="Book/Pictures/bluff.png" alt="Alt text">
+</p>
 
 # Introduction
 
