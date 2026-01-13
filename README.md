@@ -1,7 +1,7 @@
-# IS_2RETREATFRAMEWORK
+# ICESat-2 Retreat Framework
 
-Description.
+# Introduction
 
-Exemple
+# Objectives
 
-Let's start
+# Workflow
