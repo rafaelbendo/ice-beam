@@ -35,6 +35,7 @@ ICESat-2 data often contain an offset that causes beams to drift by hundreds of 
 Our approach aggregates nearby beams to reduce coastal feature mixing and maximize temporal coverage.
 
 •	What do we aim to measure?
+
 The main goal is to use reliable, post-processed ICESat-2 data to quantify coastal retreat in the Arctic region.
 
 # Ideal world
