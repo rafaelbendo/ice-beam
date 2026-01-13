@@ -25,6 +25,7 @@ ICESat-2 carries a single instrument, the Advanced Topographic Laser Altimeter S
 
  ###add more words here to bring the problems and why we are working with the on it.##
 
+#
 •	Why do this?
 
 ICESat-2 data often contain an offset that causes beams to drift by hundreds of meters, making it impossible to calculate shoreline retreat accurately without post-processing.
