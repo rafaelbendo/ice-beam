@@ -1,4 +1,5 @@
-# ICESat-2 Retreat Workflow
+# ICESat-2 Shoreline Retreat Workflow (is2shore): A Python framework to quantify Arctic coastal change using ICESat-2 (ATL06) elevation profiles, clustering, bias filtering, and DSAS-style shoreline metrics.
+
 
 <p align="center">
 	<img src="Book/Pictures/bluff.png" alt="Alt text">
@@ -6,6 +7,13 @@
 
 # Purpose
 The framework is a modular geospatial workflow that processes and analyzes ICESat-2 ATL06 elevation data to quantify Arctic coastal retreat. It filters, clusters, and aligns elevation profiles near the shoreline to reduce spatial offset and measurement bias, enabling consistent detection of shoreline change across multiple observation years.
+
+## What it does
+- Builds oriented shoreline extraction boxes per ground-track family (gt1/gt2/gt3)
+- Clips and aligns elevation profiles (offshore → inland distance)
+- Clusters beams near the coast
+- Applies vertical bias filtering across cycles
+- Estimates shoreline/bluff positions and computes change metrics (NSM, EPR, LRR where available)
 
 # Introduction
 
