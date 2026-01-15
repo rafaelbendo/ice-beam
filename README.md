@@ -1,4 +1,5 @@
-# ICE-BEAM (ICESat-2 Bluff Erosion Assessment Method): A Python framework to quantify bluffs coastal change using ICESat-2 (ATL06) elevation profiles, clustering, bias filtering, and DSAS-style shoreline metrics.
+# ICE-BEAM (ICESat-2 Bluff Erosion Assessment Method) 
+A Python framework to quantify bluffs coastal change using ICESat-2 (ATL06) elevation profiles, clustering, bias filtering, and DSAS-style shoreline metrics.
 
 IS2-BR
 
