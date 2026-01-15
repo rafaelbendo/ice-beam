@@ -388,11 +388,23 @@ def build_boxes_for_families(
     dataset_raw: gpd.GeoDataFrame,
     shoreline_gdf: gpd.GeoDataFrame,
     utm_epsg: int,
-    half_along: float,
-    half_across: float,
-    families: Sequence[str] = ("gt1", "gt2", "gt3"),
+    half_along: Optional[float] = None,
+    half_across: Optional[float] = None,
+    families: Optional[Sequence[str]] = None,
+    params: Optional[object] = None,
     verbose: bool = True,
-) -> Dict[str, Dict[str, object]]:
+):
+    if params is not None:
+        half_along  = getattr(params, "HALF_ALONG_M", half_along)
+        half_across = getattr(params, "HALF_ACROSS_M", half_across)
+        families    = getattr(params, "GTX", families)
+
+    if half_along is None or half_across is None:
+        raise ValueError("half_along and half_across must be provided (or via params).")
+
+    if families is None:
+        families = ("gt1", "gt2", "gt3")
+        
     """
     Build oriented extraction boxes for ALL families.
 
@@ -488,6 +500,7 @@ def build_boxes_for_families(
 
 def apply_preprocessing_to_clipped(
     dataset_clipped: gpd.GeoDataFrame,
+    params: Optional[object] = None,
     min_points_pct: float = 0.8,
     elev_trash: float = 20.0,
     too_far_beam: float = 46.0,
@@ -517,7 +530,23 @@ def apply_preprocessing_to_clipped(
 
     flagged_df : DataFrame
         Records for beams flagged 'too_far', including nearest_dist.
+        
+     If `params` is provided, values are read from:
+        params.MIN_POINTS_PCT
+        params.ELEV_TRASH
+        params.TOO_FAR_BEAM
+        params.IDEAL_CASE    
     """
+    # ----------------------------------------------------------
+    # Override defaults from params (if provided)
+    # ----------------------------------------------------------
+    if params is not None:
+        min_points_pct = getattr(params, "MIN_POINTS_PCT", min_points_pct)
+        elev_trash     = getattr(params, "ELEV_TRASH", elev_trash)
+        too_far_beam   = getattr(params, "TOO_FAR_BEAM", too_far_beam)
+        ideal_case     = getattr(params, "IDEAL_CASE", ideal_case)
+
+    # ----------------------------------------------------------
     if dataset_clipped is None or dataset_clipped.empty:
         empty = gpd.GeoDataFrame(columns=["geometry"], crs=getattr(dataset_clipped, "crs", None))
         if return_skipped:
