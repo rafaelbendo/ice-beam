@@ -1,10 +1,9 @@
 # ICE-BEAM (ICESat-2 Bluff Erosion Assessment Method) 
 A Python framework to quantify bluffs coastal change using ICESat-2 (ATL06) elevation profiles, clustering, bias filtering, and DSAS-style shoreline metrics.
 
-IS2-BR
 
 <p align="center">
-	<img src="Book/Pictures/bluff.png" alt="Alt text">
+	<img src="ice-beam\notebooks\pictures\copyA106AK_IMG_9549.jpg" alt="Alt text">
 </p>
 
 # Purpose
@@ -44,13 +43,13 @@ The main goal is to use reliable, post-processed ICESat-2 data to quantify coast
 Every cycle from a track pass throw out the same place on the coast that allow us to create profile where we can measure the erosion, something such as this picture below.
 
 <p align="center">
-	<img src="Book\Pictures\profile.png" alt="Alt text">
+	<img src="ice-beam\notebooks\pictures\profile.png" alt="Alt text">
 </p>
 
 However, the reality is that the ICESat-2 track has a horizontal offset that make the use of the data almost impossible as it is (See figure below).
 
 <p align="center">
-	<img src="Book\Pictures\offsetTrack.png" alt="Alt text">
+	<img src="ice-beam\notebooks\pictures\offsetTrack.png" alt="Alt text">
 </p>
 
 Because of that we decided to create this framework to group the beam in the smallest cluster possible. Avoiding to compare beam on different coastal feature or too far apart.
@@ -63,7 +62,7 @@ Define AOI
 Download data
 
 <p align="center">
-	<img src="Book\Pictures\tracks.png" alt="Alt text">
+	<img src="ice-beam\notebooks\pictures\tracks.png" alt="Alt text">
 </p>
 
 Link to notebooks to download data
