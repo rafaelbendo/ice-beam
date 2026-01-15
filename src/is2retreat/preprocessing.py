@@ -668,6 +668,90 @@ def apply_preprocessing_to_clipped(
 
     return (dataset_raw, summary_raw, flagged_df) if return_skipped else (dataset_raw, summary_raw)
 
+# ============================================================
+# Distance along beam (offshore -> inland)
+# ============================================================
+
+    def compute_distances(
+        dataset_clean: Dict[str, Dict[str, object]],
+        utm_epsg: int = 32606,
+        sort_descending_y: bool = True,
+    ) -> gpd.GeoDataFrame:
+        """
+        Compute cumulative along-track distance for each beam in each gt_family.
+
+        This function expects `dataset_clean` in the format returned by
+        `build_boxes_for_families()`:
+            dataset_clean[fam]["clipped"] -> GeoDataFrame of points
+
+        Behavior:
+        - Reprojects to UTM (utm_epsg)
+        - Sorts each beam by northing (y) to enforce offshore -> inland ordering
+        (your convention: northernmost first)
+        - Computes cumulative distance along the beam polyline
+        - Creates:
+            - point_id
+            - distance_from_offshore (cumulative)
+            - alongtrack_distance (same as distance_from_offshore)
+
+        Returns:
+            GeoDataFrame with standardized columns (where available).
+        """
+        rows: List[gpd.GeoDataFrame] = []
+
+        for fam, content in dataset_clean.items():
+            clipped = content.get("clipped")
+            if clipped is None or getattr(clipped, "empty", True):
+                continue
+
+            gdf = clipped.to_crs(utm_epsg).copy()
+
+            for bid, g in gdf.groupby("beam_id"):
+                if len(g) < 2:
+                    continue
+
+                # offshore -> inland sorting (northernmost first)
+                g = (
+                    g.assign(_y=g.geometry.y)
+                    .sort_values("_y", ascending=not sort_descending_y)
+                    .drop(columns="_y")
+                )
+
+                # cumulative along-track distance
+                xy = np.array([(p.x, p.y) for p in g.geometry])
+                seg = np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1))
+                dist = np.concatenate(([0.0], np.cumsum(seg)))
+
+                out = g.copy()
+                out["point_id"] = np.arange(len(out), dtype=int)
+
+                # overwrite any previous distance_from_offshore from earlier steps
+                out["distance_from_offshore"] = dist
+                out["alongtrack_distance"] = dist
+
+                if "acq_date" in out.columns:
+                    out["acq_date"] = pd.to_datetime(out["acq_date"], errors="coerce")
+
+                keep = [
+                    "gt_family",
+                    "beam_id",
+                    "track_id",
+                    "acq_date",
+                    "point_id",
+                    "distance_from_offshore",
+                    "alongtrack_distance",
+                    "h_li",
+                    "geometry",
+                ]
+                out = out[[c for c in keep if c in out.columns]]
+
+                rows.append(out)
+
+        if not rows:
+            return gpd.GeoDataFrame(crs=f"EPSG:{utm_epsg}")
+
+        return gpd.GeoDataFrame(pd.concat(rows, ignore_index=True), crs=f"EPSG:{utm_epsg}")
+
 
 # ============================================================
 # Notebook usage (copy these lines into your notebook)
