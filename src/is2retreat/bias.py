@@ -6,6 +6,14 @@ Vertical bias utilities for IS2Retreat framework.
 Rule in this repo:
 - params is REQUIRED for all public functions in this file.
 - No hidden numeric defaults (except purely “technical” ones like column names).
+
+NOTE
+----
+`beam_ids` is expected to be a list like:
+  [(gt_family, beam_id), (gt_family, beam_id), ...]
+
+This legacy structure is intentional and used across the pipeline.
+Do not change it unless you update all consumers.
 """
 
 from __future__ import annotations
@@ -93,12 +101,13 @@ def compute_cluster_bias(
     x_col: str = "distance_from_offshore",
     y_col: str = "h_li",
     include_reference: bool = True,
+    x0: float | None = None,
 ) -> pd.DataFrame:
     """
     Compute vertical bias between beams in each selected cluster at x0.
 
     Required params:
-      - BIAS_X0  (float)
+      - BIAS_X0  (float)  [used if x0 is None]
 
     Bias definition:
       bias = y_test(x0) - y_ref(x0)
@@ -111,7 +120,11 @@ def compute_cluster_bias(
     Returns DataFrame with columns:
       gt_family, cluster_id, reference_beam, beam_id, acq_date, bias_<x0>
     """
-    x0 = float(_require_param(params, "BIAS_X0"))
+    if x0 is None:
+        x0 = float(_require_param(params, "BIAS_X0"))
+    else:
+        x0 = float(x0)
+
     bias_col = f"bias_{int(round(x0))}"
     cols = ["gt_family", "cluster_id", "reference_beam", "beam_id", "acq_date", bias_col]
 
@@ -201,20 +214,22 @@ def apply_bias_filter_clusters(
     params: object,
     x_col: str = "distance_from_offshore",
     y_col: str = "h_li",
+    bias_tolerance: float | None = None,
+    x0: float | None = None,
     verbose: bool = False,
 ) -> Tuple[gpd.GeoDataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Apply bias filtering, producing accepted profiles and bias summary.
 
     Required params:
-      - BIAS_TOLERANCE (float)
-      - BIAS_X0        (float)
+      - BIAS_TOLERANCE (float) [used if bias_tolerance is None]
+      - BIAS_X0        (float) [used if x0 is None]
 
     Workflow:
       - reference beam = selected_clusters["beam_id"] (cluster seed)
       - compute y_ref(x0) from the most recent baseline cycle with finite y_ref
       - always keep ALL baseline (reference) cycles
-      - for non-reference beams, keep cycles where |bias| <= BIAS_TOLERANCE
+      - for non-reference beams, keep cycles where |bias| <= bias_tolerance
       - attach cluster_id to accepted profiles during loop (no spatial join needed)
 
     Returns:
@@ -225,12 +240,24 @@ def apply_bias_filter_clusters(
       bias_summary      : DataFrame summary per (gt_family, cluster_id, reference_beam)
       bias_df           : DataFrame record for every evaluated beam/date with keep flag
     """
-    bias_tolerance = float(_require_param(params, "BIAS_TOLERANCE"))
-    x0 = float(_require_param(params, "BIAS_X0"))
+    if bias_tolerance is None:
+        bias_tolerance = float(_require_param(params, "BIAS_TOLERANCE"))
+    else:
+        bias_tolerance = float(bias_tolerance)
+
+    if x0 is None:
+        x0 = float(_require_param(params, "BIAS_X0"))
+    else:
+        x0 = float(x0)
+
     bias_col = f"bias_{int(round(x0))}"
 
     if dataset_raw is None or dataset_raw.empty or selected_clusters is None or selected_clusters.empty:
-        empty = gpd.GeoDataFrame(columns=getattr(dataset_raw, "columns", []), geometry="geometry", crs=getattr(dataset_raw, "crs", None))
+        empty = gpd.GeoDataFrame(
+            columns=getattr(dataset_raw, "columns", []),
+            geometry="geometry",
+            crs=getattr(dataset_raw, "crs", None),
+        )
         return empty, pd.DataFrame(), pd.DataFrame()
 
     # --------------------------
@@ -293,7 +320,10 @@ def apply_bias_filter_clusters(
             continue
 
         # choose most recent date with finite y_ref(x0)
-        y_ref_by_dt = {dt: _interp_at_x0(base[base["acq_date"] == dt], x0, x_col, y_col) for dt in base_dates}
+        y_ref_by_dt = {
+            dt: _interp_at_x0(base[base["acq_date"] == dt], x0, x_col, y_col)
+            for dt in base_dates
+        }
         finite_dt = [dt for dt in base_dates if np.isfinite(y_ref_by_dt[dt])]
         if not finite_dt:
             continue
@@ -410,7 +440,6 @@ def apply_bias_filter_clusters(
               .rename(columns={"keep": "n_kept"})
     )
 
-    # total beams from selected_clusters (beam_ids length)
     counts = (
         sc.groupby(["gt_family", "cluster_id"], as_index=False)
           .agg(
