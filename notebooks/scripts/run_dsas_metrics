@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from is2retreat.config import Params
+from is2retreat.pipeline import run_workflow
+from is2retreat.bluff import process_cluster_with_reference
+from is2retreat.metrics import compute_cluster_statistics
+
+
+REQUIRED_COLS = ["track_id", "ClusterSize", "bias_tolerance", "gt_family", "cluster_id"]
+
+
+def _load_existing(outfile: Path) -> pd.DataFrame:
+    if outfile.exists():
+        df = pd.read_csv(outfile, dtype={"track_id": str})
+    else:
+        df = pd.DataFrame()
+
+    for c in REQUIRED_COLS:
+        if c not in df.columns:
+            df[c] = np.nan
+
+    return df
+
+
+def _normalize_track_id(track_id) -> str:
+    try:
+        return f"{int(track_id):04d}"
+    except Exception:
+        return str(track_id)
+
+
+def run_dsas_for_params(
+    dataset_raw,
+    summary_raw,
+    shoreline_gdf,
+    track_id,
+    params: Params,
+    verbose: bool = False,
+) -> list[dict]:
+    """
+    Runs one workflow setup (single cluster size + bias tolerance),
+    then computes DSAS-style metrics per selected cluster.
+    """
+    (
+        summary_fam,
+        summary_clust,
+        dataset_clean,
+        clusters_gdf,
+        selected_clusters,
+        filtered_profiles,
+        bias_summary,
+        bias_df,
+    ) = run_workflow(
+        track_id=track_id,
+        dataset_raw=dataset_raw,
+        shoreline_gdf=shoreline_gdf,
+        params=params,
+        verbose=verbose,
+    )
+
+    results: list[dict] = []
+    if selected_clusters is None or selected_clusters.empty:
+        return results
+
+    track_str = _normalize_track_id(track_id)
+
+    for fam in selected_clusters["gt_family"].unique():
+        fam_clusters = selected_clusters.query("gt_family == @fam")
+
+        # initial cycles from summary_raw (if present)
+        try:
+            initial_cycles = int(summary_raw.loc[fam, "loaded"]) if fam in summary_raw.index else 0
+        except Exception:
+            initial_cycles = 0
+
+        # used cycles overall (after bias filtering)
+        used_cycles = (
+            filtered_profiles.query("gt_family == @fam")["beam_id"].nunique()
+            if filtered_profiles is not None and not filtered_profiles.empty else 0
+        )
+
+        for cid in fam_clusters["cluster_id"].unique():
+            cid = int(cid)
+
+            bluff_df, y_ref = process_cluster_with_reference(
+                filtered_profiles=filtered_profiles,
+                selected_clusters=fam_clusters,
+                params=params,
+                cluster_id=cid,
+                gt_family=str(fam),
+                which="first",
+                bias_df=bias_df,
+                debug=False,
+            )
+
+            if bluff_df is None or bluff_df.empty:
+                continue
+
+            stats = compute_cluster_statistics(bluff_df, params=params)
+
+            # temporal span in years (nice for plots)
+            span_days = stats.get("TemporalSpan_days", np.nan)
+            cluster_years = round(span_days / 365.25, 2) if pd.notna(span_days) else np.nan
+
+            # dates
+            bluff_df = bluff_df.copy()
+            bluff_df["acq_date_norm"] = pd.to_datetime(bluff_df["acq_date"], errors="coerce").dt.normalize()
+            first_dt = bluff_df["acq_date_norm"].min()
+            last_dt = bluff_df["acq_date_norm"].max()
+
+            # angle + center from selected clusters
+            def _safe_get(col: str) -> float:
+                try:
+                    return float(fam_clusters.loc[fam_clusters["cluster_id"] == cid, col].iloc[0])
+                except Exception:
+                    return np.nan
+
+            angle_val = _safe_get("angle_deg")
+            center_lat = _safe_get("center_lat")
+            center_lon = _safe_get("center_lon")
+
+            # used cycles per cluster (after bias filtering)
+            try:
+                raw = fam_clusters.loc[fam_clusters["cluster_id"] == cid, "beam_ids"].iloc[0]
+                cluster_beams = {b[1] if isinstance(b, (list, tuple)) else b for b in raw}
+
+                used_cycles_cluster = (
+                    filtered_profiles
+                    .query("gt_family == @fam and beam_id in @cluster_beams")["beam_id"]
+                    .nunique()
+                    if filtered_profiles is not None and not filtered_profiles.empty else 0
+                )
+            except Exception:
+                used_cycles_cluster = np.nan
+
+            results.append(
+                {
+                    "track_id": track_str,
+                    "ClusterSize": int(params.CLUSTER_DISTANCE_M),
+                    "bias_tolerance": float(params.BIAS_TOLERANCE),
+                    "gt_family": str(fam),
+                    "cluster_id": cid,
+
+                    # DSAS metrics
+                    "NSM": stats.get("NSM", np.nan),
+                    "SCE": stats.get("SCE", np.nan),
+                    "EPR": stats.get("EPR", np.nan),
+                    "LRR": stats.get("LRR", np.nan),
+                    "LR2": stats.get("LR2", np.nan),
+                    "LSE": stats.get("LSE", np.nan),
+                    "LCI": stats.get("LCI", np.nan),
+                    "TemporalSpan_days": stats.get("TemporalSpan_days", np.nan),
+                    "ClusterTemporalSpanYears": cluster_years,
+                    "ValidRegression": stats.get("ValidRegression", False),
+
+                    # geometry-based metrics
+                    "angle_deg": angle_val,
+                    "center_lat": center_lat,
+                    "center_lon": center_lon,
+
+                    # dates
+                    "first_date": first_dt,
+                    "last_date": last_dt,
+
+                    # bookkeeping
+                    "initial_cycles": initial_cycles,
+                    "used_cycles": used_cycles,
+                    "used_cycles_cluster": used_cycles_cluster,
+                }
+            )
+
+    return results
+
+
+def main(
+    dataset_raw,
+    summary_raw,
+    shoreline_gdf,
+    track_id,
+    cluster_sizes: list[int] | None = None,
+    bias_tolerances: list[float] | None = None,
+    outfile: str | Path = "DSAS_clusters.csv",
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """
+    Notebook-callable driver.
+
+    Example (in notebook):
+        from scripts.run_dsas_metrics import main
+        df = main(dataset_raw, summary_raw, shoreline_gdf, TRACK_ID)
+    """
+    if cluster_sizes is None:
+        cluster_sizes = [6, 12, 18, 24, 30, 36, 42]
+    if bias_tolerances is None:
+        bias_tolerances = [0.25, 0.5, 0.75, 1.0]
+
+    outfile = Path(outfile)
+    existing = _load_existing(outfile)
+
+    track_str = _normalize_track_id(track_id)
+    all_rows: list[dict] = []
+
+    base = Params()
+
+    print("🚀 Running DSAS analysis...\n")
+
+    for cs in cluster_sizes:
+        for tol in bias_tolerances:
+            print(f"▶ ClusterSize={cs:>3} m | BiasTol={tol:.2f} m")
+
+            already = existing[
+                (existing["track_id"] == track_str)
+                & (existing["ClusterSize"] == cs)
+                & (existing["bias_tolerance"] == tol)
+            ]
+
+            if not already.empty:
+                print("   ⏩ Skipped (already exists)\n")
+                continue
+
+            p = replace(base, CLUSTER_DISTANCE_M=float(cs), BIAS_TOLERANCE=float(tol))
+            rows = run_dsas_for_params(
+                dataset_raw=dataset_raw,
+                summary_raw=summary_raw,
+                shoreline_gdf=shoreline_gdf,
+                track_id=track_id,
+                params=p,
+                verbose=verbose,
+            )
+
+            print(f"   → {len(rows)} clusters processed.\n")
+            all_rows.extend(rows)
+
+    new_df = pd.DataFrame(all_rows)
+
+    if not new_df.empty:
+        combined = pd.concat([existing, new_df], ignore_index=True)
+        combined = combined.drop_duplicates(
+            subset=["track_id", "ClusterSize", "bias_tolerance", "gt_family", "cluster_id"],
+            keep="last",
+        )
+    else:
+        combined = existing
+
+    combined.to_csv(outfile, index=False)
+    print(f"✅ DSAS summary updated → {outfile}")
+
+    return combined

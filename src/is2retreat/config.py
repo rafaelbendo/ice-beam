@@ -8,28 +8,33 @@ from typing import Sequence
 class Params:
     """
     Default parameters for the ICESat-2 shoreline framework.
-
-    Keep your tuning here. In notebooks/scripts, create variants like:
-        P = Params()
-        P.BIAS_TOLERANCE = 0.75
     """
+
+    # ------------------------------
+    # CRS / projection
+    # ------------------------------
+    ORIGINAL_CRS: str = "EPSG:4326"
+    UTM_EPSG: int = 32606
 
     # ------------------------------
     # Spatial clustering parameters
     # ------------------------------
     CLUSTER_DISTANCE_M: float = 18.0
+    MIN_BEAMS: int = 2
+    ANGLE_SEARCH_RADIUS: float = 10.0
 
     # ------------------------------
     # Vertical filtering parameters
     # ------------------------------
     VERTICAL_TOLERANCE: float = 5.0
     BIAS_TOLERANCE: float = 0.5
+    BIAS_X0: float = 550.0
 
     # ------------------------------
     # Temporal / data sufficiency
     # ------------------------------
     MIN_PROFILES_PER_CLUSTER: int = 2
-    MIN_POINTS_PCT: float = 0.8  # beam must have >= 80% of family mean points (after clipping)
+    MIN_POINTS_PCT: float = 0.8
 
     # ------------------------------
     # Oriented box dimensions (UTM meters)
@@ -45,7 +50,7 @@ class Params:
     # ------------------------------
     # Elevation filtering
     # ------------------------------
-    ELEV_TRASH: float = 20.0  # remove beams with h_li above +ELEV_TRASH or below -ELEV_TRASH
+    ELEV_TRASH: float = 20.0
 
     # ------------------------------
     # Beam separation constraint
@@ -57,7 +62,18 @@ class Params:
     # ------------------------------
     GTX: Sequence[str] = ("gt1", "gt2", "gt3")
 
+    # ------------------------------
+    # Bluff crossing parameters
+    # ------------------------------
+    GAP_THRESHOLD_M: float = 40.0
+    CROSSING_ATOL: float = 1e-3
+
+    # ------------------------------
+    # DSAS / regression parameters
+    # ------------------------------
+    CONFIDENCE: float = 0.95
+    MIN_SPAN_DAYS: int = 365
+    
     @property
     def IDEAL_CASE(self) -> int:
-        # If every cycle has 2 beams
         return self.N_CYCLES * 2
