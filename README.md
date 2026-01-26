@@ -3,7 +3,7 @@ A Python framework to quantify bluffs coastal change using ICESat-2 (ATL06) elev
 
 
 <p align="center">
-	<img src="ice-beam\notebooks\pictures\copyA106AK_IMG_9549.jpg" alt="Alt text">
+	<img src="C:\coding\arctic\paper1\Notebook\ice-beam\pictures\copyA106AK_IMG_9549.jpg" alt="Alt text">
 </p>
 
 # Purpose
@@ -16,12 +16,12 @@ The framework is a modular geospatial workflow that processes and analyzes ICESa
 - Applies vertical bias filtering across cycles
 - Estimates shoreline/bluff positions and computes change metrics (NSM, EPR, LRR where available)
 
-# Introduction
+<!-- # Introduction
 
 Importance of permafrost to climate changes…
 The impact of the permafrost thaw and erosion…
 How hard is to monitor it. The potential of RS …
-IS-2 data as an option
+IS-2 data as an option -->
 
 #
 •	Why do this?
@@ -43,13 +43,13 @@ The main goal is to use reliable, post-processed ICESat-2 data to quantify coast
 Every cycle from a track pass throw out the same place on the coast that allow us to create profile where we can measure the erosion, something such as this picture below.
 
 <p align="center">
-	<img src="ice-beam\notebooks\pictures\profile.png" alt="Alt text">
+	<img src="C:\coding\arctic\paper1\Notebook\ice-beam\pictures\profile.png" alt="Alt text">
 </p>
 
 However, the reality is that the ICESat-2 track has a horizontal offset that make the use of the data almost impossible as it is (See figure below).
 
 <p align="center">
-	<img src="ice-beam\notebooks\pictures\offsetTrack.png" alt="Alt text">
+	<img src="C:\coding\arctic\paper1\Notebook\ice-beam\pictures\offsetTrack.png" alt="Alt text">
 </p>
 
 Because of that we decided to create this framework to group the beam in the smallest cluster possible. Avoiding to compare beam on different coastal feature or too far apart.
@@ -62,7 +62,7 @@ Define AOI
 Download data
 
 <p align="center">
-	<img src="ice-beam\notebooks\pictures\tracks.png" alt="Alt text">
+	<img src="C:\coding\arctic\paper1\Notebook\ice-beam\pictures\tracks.png" alt="Alt text">
 </p>
 
 Link to notebooks to download data
@@ -70,7 +70,7 @@ Link to notebooks to download data
 Issues:
 Bad or No data
 
-# Workflow (Show every challenge and How I solve it)
+# Workflow
 
 1.	Load and Preprocess ALT06
 2.	Build oriented shoreline–crossing boxes
