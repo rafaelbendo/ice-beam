@@ -6,8 +6,23 @@ One-file (for now) module that contains:
 - I/O helpers (shoreline + beams)
 - geometry helpers (middle beam, shoreline crossing, oriented boxes)
 - preprocessing filters applied to clipped data
+- distance along beam (offshore -> inland)
 
-Later, you can split this into io.py / geometry.py / preprocessing.py, etc.
+IMPORTANT FIX
+-------------
+Your old workflow assumes `beam_id` is the PHYSICAL beam name:
+    gt1l, gt1r, gt2l, gt2r, gt3l, gt3r
+
+A previous version set:
+    beam_id = f.stem   (unique per file/cycle)
+
+That breaks "middle beam" logic and shoreline crossing stability.
+
+This file restores:
+    beam_id = extract_beam_id(filename)  # gt1l/gt1r/...
+
+And stores provenance separately:
+    file_stem, file_path
 """
 
 from __future__ import annotations
@@ -34,7 +49,6 @@ def _union_all(geoseries: gpd.GeoSeries):
     """
     Compatibility helper for Shapely/GeoPandas union API differences.
     """
-    # GeoPandas GeoSeries has unary_union; newer stacks may also have union_all().
     if hasattr(geoseries, "union_all"):
         try:
             return geoseries.union_all()
@@ -45,19 +59,26 @@ def _union_all(geoseries: gpd.GeoSeries):
 
 def _build_beam_lines(fam_df_utm: gpd.GeoDataFrame) -> Dict[str, LineString]:
     """
-    Build an ordered LineString for each beam_id in a (UTM-projected) family GeoDataFrame.
+    Build an ordered LineString for each physical beam_id in a (UTM-projected) family GeoDataFrame.
+    beam_id must be one of: gt1l/gt1r/gt2l/gt2r/gt3l/gt3r
     """
     lines: Dict[str, LineString] = {}
+    if fam_df_utm is None or fam_df_utm.empty:
+        return lines
+
     for beam_id, g in fam_df_utm.groupby("beam_id"):
         if len(g) < 2:
             continue
-        # sort by northing to enforce stable line ordering
         g_sorted = (
             g.assign(_y=g.geometry.y)
              .sort_values("_y")
              .drop(columns="_y")
         )
-        lines[str(beam_id)] = LineString(g_sorted.geometry.tolist())
+        line = LineString(g_sorted.geometry.tolist())
+        if line.is_empty or line.length == 0:
+            continue
+        lines[str(beam_id)] = line
+
     return lines
 
 
@@ -73,8 +94,33 @@ def _pick_cross_point(intersection_geom, center_pt: Point) -> Optional[Point]:
         return intersection_geom
     if gt == "MultiPoint":
         return min(intersection_geom.geoms, key=lambda p: p.distance(center_pt))
+
     # LineString / GeometryCollection / etc.
     return intersection_geom.centroid
+
+
+def _local_tangent(nearest_line: LineString, cross_pt: Point, ds: float = 50.0) -> Optional[Tuple[float, float]]:
+    """
+    Compute a unit tangent vector near the shoreline crossing.
+    ds is the half-window length (meters) along the line used to compute direction.
+    """
+    if nearest_line is None or nearest_line.is_empty or nearest_line.length == 0:
+        return None
+    if cross_pt is None or cross_pt.is_empty:
+        return None
+
+    s = float(nearest_line.project(cross_pt))
+    s0 = max(0.0, s - float(ds))
+    s1 = min(float(nearest_line.length), s + float(ds))
+
+    p0 = nearest_line.interpolate(s0)
+    p1 = nearest_line.interpolate(s1)
+
+    vx, vy = (p1.x - p0.x), (p1.y - p0.y)
+    n = float(np.hypot(vx, vy))
+    if n == 0:
+        return None
+    return (vx / n, vy / n)
 
 
 # ============================================================
@@ -118,6 +164,26 @@ def extract_gt_family(filename: str) -> Optional[str]:
     return None
 
 
+def extract_beam_id(filename: str) -> Optional[str]:
+    """
+    Extract the physical beam id: gt1l/gt1r/gt2l/gt2r/gt3l/gt3r.
+    """
+    tokens = Path(filename).stem.lower().split("_")
+    valid = {"gt1l", "gt1r", "gt2l", "gt2r", "gt3l", "gt3r"}
+
+    for t in tokens:
+        if t in valid:
+            return t
+
+    # fallback: substring scan
+    for t in tokens:
+        for b in valid:
+            if b in t:
+                return b
+
+    return None
+
+
 def extract_track_number(filename: str) -> Optional[str]:
     """
     Extract the 4-digit track number from a filename.
@@ -128,12 +194,10 @@ def extract_track_number(filename: str) -> Optional[str]:
     """
     stem = Path(filename).stem
 
-    # exact 4-digit tokens
     for token in stem.split("_"):
         if token.isdigit() and len(token) == 4:
             return token
 
-    # fallback: find any numeric run and take first 4 digits
     digits = "".join(c if c.isdigit() else " " for c in stem).split()
     for seq in digits:
         if len(seq) >= 4:
@@ -180,7 +244,8 @@ def load_beams(
         - track_id  (4-digit)
         - acq_date  (datetime)
         - year
-        - beam_id   (stable from filename stem)
+        - beam_id   (PHYSICAL beam: gt1l/gt1r/...)
+        - file_stem (per-file id for provenance/debug)
         - file_path
 
     Returns:
@@ -214,15 +279,27 @@ def load_beams(
         gdf = gdf.to_crs(utm_epsg)
 
         # metadata
-        date_val = extract_date_from_filename(f.name)
-        fam = extract_gt_family(f.name)
+        date_val  = extract_date_from_filename(f.name)
+        fam       = extract_gt_family(f.name)
         track_val = extract_track_number(f.name)
+        beam_phys = extract_beam_id(f.name)
+
+        # skip files with missing metadata (keeps geometry logic clean downstream)
+        if beam_phys is None or fam is None or track_val is None or date_val is None:
+            if verbose:
+                print(f"[WARN] Missing metadata → skipped: {f.name}")
+            continue
 
         gdf["gt_family"] = fam
-        gdf["track_id"] = track_val
-        gdf["acq_date"] = date_val
-        gdf["year"] = date_val.year if date_val else None
-        gdf["beam_id"] = f.stem
+        gdf["track_id"]  = track_val
+        gdf["acq_date"]  = date_val
+        gdf["year"]      = date_val.year
+
+        # IMPORTANT: physical beam name (gt1l/gt1r/...)
+        gdf["beam_id"] = beam_phys
+
+        # provenance/debug
+        gdf["file_stem"] = f.stem
         gdf["file_path"] = str(f)
 
         rows.append(gdf)
@@ -235,9 +312,12 @@ def load_beams(
     dataset = gpd.GeoDataFrame(pd.concat(rows, ignore_index=True), crs=f"EPSG:{utm_epsg}")
 
     if verbose:
-        nb = dataset["beam_id"].nunique()
-        print(f"[RAW] Loaded beams: {nb} unique beams")
+        nb_phys = dataset["beam_id"].nunique()
+        nb_files = dataset["file_stem"].nunique() if "file_stem" in dataset.columns else np.nan
+        print(f"[RAW] Loaded beams: {nb_phys} physical beams")
+        print(f"      Files (cycles): {nb_files}")
         print(f"      Total points: {len(dataset):,}")
+        print(f"      Physical beams present: {sorted(dataset['beam_id'].dropna().unique().tolist())}")
 
     return dataset
 
@@ -256,8 +336,8 @@ def get_middle_crossing(
     For a given gt_family:
         - project family points to UTM
         - compute overall centroid
-        - build LineString per beam
-        - pick beam line closest to centroid
+        - build LineString per PHYSICAL beam (gtXl/gtXr)
+        - pick beam line closest to centroid (the "middle beam")
         - intersect with shoreline (already in UTM)
 
     Returns:
@@ -277,9 +357,7 @@ def get_middle_crossing(
         raise ValueError("shoreline_utm has no CRS.")
     epsg = shoreline_utm.crs.to_epsg()
     if epsg is None or int(epsg) != int(utm_epsg):
-        raise ValueError(
-            f"shoreline_utm must be in EPSG:{utm_epsg} (got {shoreline_utm.crs})."
-        )
+        raise ValueError(f"shoreline_utm must be in EPSG:{utm_epsg} (got {shoreline_utm.crs}).")
 
     fam_df = fam_df.to_crs(utm_epsg)
 
@@ -347,19 +425,15 @@ def build_box_from_centroid(
                 print(f"[WARN] {gt_family}: no shoreline crossing found.")
             return center_pt, None, None, None, nearest_beam
 
-        # tangent direction from mid-segment
-        p0 = nearest_line.interpolate(0.4, normalized=True)
-        p1 = nearest_line.interpolate(0.6, normalized=True)
-
-        vx, vy = (p1.x - p0.x), (p1.y - p0.y)
-        norm = np.hypot(vx, vy)
-
-        if norm == 0:
+        # local tangent near crossing
+        t = _local_tangent(nearest_line, cross_pt, ds=50.0)
+        if t is None:
             if verbose:
                 print(f"[WARN] {gt_family}: invalid tangent vector.")
             return center_pt, None, None, cross_pt, nearest_beam
 
-        t_hat = np.array([vx, vy]) / norm
+        vx, vy = t
+        t_hat = np.array([vx, vy])
         n_hat = np.array([-t_hat[1], t_hat[0]])
 
         c = np.array([cross_pt.x, cross_pt.y])
@@ -394,17 +468,6 @@ def build_boxes_for_families(
     params: Optional[object] = None,
     verbose: bool = True,
 ):
-    if params is not None:
-        half_along  = getattr(params, "HALF_ALONG_M", half_along)
-        half_across = getattr(params, "HALF_ACROSS_M", half_across)
-        families    = getattr(params, "GTX", families)
-
-    if half_along is None or half_across is None:
-        raise ValueError("half_along and half_across must be provided (or via params).")
-
-    if families is None:
-        families = ("gt1", "gt2", "gt3")
-        
     """
     Build oriented extraction boxes for ALL families.
 
@@ -417,6 +480,17 @@ def build_boxes_for_families(
             "nearest_beam": str
         }
     """
+    if params is not None:
+        half_along  = getattr(params, "HALF_ALONG_M", half_along)
+        half_across = getattr(params, "HALF_ACROSS_M", half_across)
+        families    = getattr(params, "GTX", families)
+
+    if half_along is None or half_across is None:
+        raise ValueError("half_along and half_across must be provided (or via params).")
+
+    if families is None:
+        families = ("gt1", "gt2", "gt3")
+
     dataset_clean: Dict[str, Dict[str, object]] = {}
 
     shoreline_utm = shoreline_gdf.to_crs(utm_epsg)
@@ -442,18 +516,15 @@ def build_boxes_for_families(
                 print(f"[WARN] {fam}: no shoreline crossing found.")
             continue
 
-        # tangent
-        p0 = nearest_line.interpolate(0.4, normalized=True)
-        p1 = nearest_line.interpolate(0.6, normalized=True)
-
-        vx, vy = p1.x - p0.x, p1.y - p0.y
-        norm = np.hypot(vx, vy)
-        if norm == 0:
+        # local tangent near crossing (more stable than normalized 0.4/0.6)
+        t = _local_tangent(nearest_line, cross_pt, ds=50.0)
+        if t is None:
             if verbose:
                 print(f"[WARN] {fam}: invalid tangent vector.")
             continue
 
-        t_hat = np.array([vx, vy]) / norm
+        vx, vy = t
+        t_hat = np.array([vx, vy])
         n_hat = np.array([-t_hat[1], t_hat[0]])
 
         C = np.array([cross_pt.x, cross_pt.y])
@@ -474,7 +545,7 @@ def build_boxes_for_families(
                 print(f"[WARN] {fam}: no clipped points inside box.")
             continue
 
-        # NOTE: this is radial distance to the crossing point (not along-track projection).
+        # NOTE: radial distance to crossing point (legacy behavior).
         cx, cy = cross_pt.x, cross_pt.y
         clipped["distance_from_offshore"] = clipped.geometry.apply(
             lambda p: float(np.hypot(p.x - cx, p.y - cy))
@@ -489,7 +560,7 @@ def build_boxes_for_families(
         }
 
         if verbose:
-            print(f"[OK] {fam}: box built with {len(clipped)} clipped points.")
+            print(f"[OK] {fam}: box built with {len(clipped)} clipped points. nearest_beam={nearest_beam}")
 
     return dataset_clean
 
@@ -530,23 +601,19 @@ def apply_preprocessing_to_clipped(
 
     flagged_df : DataFrame
         Records for beams flagged 'too_far', including nearest_dist.
-        
-     If `params` is provided, values are read from:
+
+    If `params` is provided, values are read from:
         params.MIN_POINTS_PCT
         params.ELEV_TRASH
         params.TOO_FAR_BEAM
-        params.IDEAL_CASE    
+        params.IDEAL_CASE
     """
-    # ----------------------------------------------------------
-    # Override defaults from params (if provided)
-    # ----------------------------------------------------------
     if params is not None:
         min_points_pct = getattr(params, "MIN_POINTS_PCT", min_points_pct)
         elev_trash     = getattr(params, "ELEV_TRASH", elev_trash)
         too_far_beam   = getattr(params, "TOO_FAR_BEAM", too_far_beam)
         ideal_case     = getattr(params, "IDEAL_CASE", ideal_case)
 
-    # ----------------------------------------------------------
     if dataset_clipped is None or dataset_clipped.empty:
         empty = gpd.GeoDataFrame(columns=["geometry"], crs=getattr(dataset_clipped, "crs", None))
         if return_skipped:
@@ -555,7 +622,6 @@ def apply_preprocessing_to_clipped(
 
     gdf = dataset_clipped.copy()
 
-    # A) family mean points (after clipping)
     fam_mean_pts = (
         gdf.groupby(["gt_family", "beam_id"])
            .size()
@@ -564,7 +630,6 @@ def apply_preprocessing_to_clipped(
            .to_dict()
     )
 
-    # B) beam-level flags
     beams_info: List[dict] = []
     for (fam, bid), bdf in gdf.groupby(["gt_family", "beam_id"]):
         fam_avg = fam_mean_pts.get(fam, np.nan)
@@ -591,7 +656,6 @@ def apply_preprocessing_to_clipped(
 
     beam_flags = pd.DataFrame(beams_info)
 
-    # C) too_far flag using median XY per beam inside each family
     flagged_records: List[dict] = []
     beam_flags["nearest_dist"] = np.nan
     beam_flags["too_far"] = False
@@ -611,7 +675,6 @@ def apply_preprocessing_to_clipped(
         nearest_dist = dist[:, 1]  # second neighbor is the nearest other beam
         too_far_mask = nearest_dist > too_far_beam
 
-        # write back to beam_flags
         for (beam_id, d, tf) in zip(med_xy.index, nearest_dist, too_far_mask):
             sel = (beam_flags["gt_family"] == fam) & (beam_flags["beam_id"] == beam_id)
             beam_flags.loc[sel, "nearest_dist"] = float(d)
@@ -624,7 +687,6 @@ def apply_preprocessing_to_clipped(
 
     flagged_df = pd.DataFrame(flagged_records)
 
-    # D) status by priority
     def classify(row) -> str:
         if bool(row.get("elev_trash")):
             return "elev_trash"
@@ -639,7 +701,6 @@ def apply_preprocessing_to_clipped(
     kept = set(beam_flags.loc[beam_flags["status"] == "loaded", "beam_id"])
     dataset_raw = gdf[gdf["beam_id"].isin(kept)].copy()
 
-    # E) summary
     summary = (
         beam_flags.groupby(["gt_family", "status"])
                   .size()
@@ -668,117 +729,96 @@ def apply_preprocessing_to_clipped(
 
     return (dataset_raw, summary_raw, flagged_df) if return_skipped else (dataset_raw, summary_raw)
 
+
 # ============================================================
 # Distance along beam (offshore -> inland)
 # ============================================================
 
-    def compute_distances(
-        dataset_clean: Dict[str, Dict[str, object]],
-        utm_epsg: int = 32606,
-        sort_descending_y: bool = True,
-    ) -> gpd.GeoDataFrame:
-        """
-        Compute cumulative along-track distance for each beam in each gt_family.
+def compute_distances(
+    dataset_clean: Dict[str, Dict[str, object]],
+    utm_epsg: int = 32606,
+    sort_descending_y: bool = True,
+) -> gpd.GeoDataFrame:
+    """
+    Compute cumulative along-track distance for each beam in each gt_family.
 
-        This function expects `dataset_clean` in the format returned by
-        `build_boxes_for_families()`:
-            dataset_clean[fam]["clipped"] -> GeoDataFrame of points
+    Expects dataset_clean in the format returned by build_boxes_for_families():
+        dataset_clean[fam]["clipped"] -> GeoDataFrame of points
 
-        Behavior:
-        - Reprojects to UTM (utm_epsg)
-        - Sorts each beam by northing (y) to enforce offshore -> inland ordering
-        (your convention: northernmost first)
-        - Computes cumulative distance along the beam polyline
-        - Creates:
-            - point_id
-            - distance_from_offshore (cumulative)
-            - alongtrack_distance (same as distance_from_offshore)
+    Behavior:
+    - projects to UTM
+    - sorts each beam by northing to enforce offshore -> inland ordering (your convention)
+    - computes cumulative distance along the beam polyline
 
-        Returns:
-            GeoDataFrame with standardized columns (where available).
-        """
-        rows: List[gpd.GeoDataFrame] = []
+    Outputs:
+      - point_id
+      - distance_from_offshore (cumulative)
+      - alongtrack_distance (same)
+    """
+    rows: List[gpd.GeoDataFrame] = []
 
-        for fam, content in dataset_clean.items():
-            clipped = content.get("clipped")
-            if clipped is None or getattr(clipped, "empty", True):
+    for fam, content in dataset_clean.items():
+        clipped = content.get("clipped")
+        if clipped is None or getattr(clipped, "empty", True):
+            continue
+
+        gdf = clipped.to_crs(utm_epsg).copy()
+
+        for bid, g in gdf.groupby("beam_id"):
+            if len(g) < 2:
                 continue
 
-            gdf = clipped.to_crs(utm_epsg).copy()
+            # offshore -> inland sorting (northernmost first) if sort_descending_y=True
+            g = (
+                g.assign(_y=g.geometry.y)
+                 .sort_values("_y", ascending=not sort_descending_y)
+                 .drop(columns="_y")
+            )
 
-            for bid, g in gdf.groupby("beam_id"):
-                if len(g) < 2:
-                    continue
+            xy = np.array([(p.x, p.y) for p in g.geometry])
+            seg = np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1))
+            dist = np.concatenate(([0.0], np.cumsum(seg)))
 
-                # offshore -> inland sorting (northernmost first)
-                g = (
-                    g.assign(_y=g.geometry.y)
-                    .sort_values("_y", ascending=not sort_descending_y)
-                    .drop(columns="_y")
-                )
+            out = g.copy()
+            out["point_id"] = np.arange(len(out), dtype=int)
 
-                # cumulative along-track distance
-                xy = np.array([(p.x, p.y) for p in g.geometry])
-                seg = np.sqrt(np.sum(np.diff(xy, axis=0) ** 2, axis=1))
-                dist = np.concatenate(([0.0], np.cumsum(seg)))
+            out["distance_from_offshore"] = dist
+            out["alongtrack_distance"] = dist
 
-                out = g.copy()
-                out["point_id"] = np.arange(len(out), dtype=int)
+            if "acq_date" in out.columns:
+                out["acq_date"] = pd.to_datetime(out["acq_date"], errors="coerce")
 
-                # overwrite any previous distance_from_offshore from earlier steps
-                out["distance_from_offshore"] = dist
-                out["alongtrack_distance"] = dist
+            keep = [
+                "gt_family",
+                "beam_id",
+                "track_id",
+                "acq_date",
+                "point_id",
+                "distance_from_offshore",
+                "alongtrack_distance",
+                "h_li",
+                "geometry",
+            ]
+            out = out[[c for c in keep if c in out.columns]]
 
-                if "acq_date" in out.columns:
-                    out["acq_date"] = pd.to_datetime(out["acq_date"], errors="coerce")
+            rows.append(out)
 
-                keep = [
-                    "gt_family",
-                    "beam_id",
-                    "track_id",
-                    "acq_date",
-                    "point_id",
-                    "distance_from_offshore",
-                    "alongtrack_distance",
-                    "h_li",
-                    "geometry",
-                ]
-                out = out[[c for c in keep if c in out.columns]]
+    if not rows:
+        return gpd.GeoDataFrame(crs=f"EPSG:{utm_epsg}")
 
-                rows.append(out)
-
-        if not rows:
-            return gpd.GeoDataFrame(crs=f"EPSG:{utm_epsg}")
-
-        return gpd.GeoDataFrame(pd.concat(rows, ignore_index=True), crs=f"EPSG:{utm_epsg}")
+    return gpd.GeoDataFrame(pd.concat(rows, ignore_index=True), crs=f"EPSG:{utm_epsg}")
 
 
-# ============================================================
-# Notebook usage (copy these lines into your notebook)
-# ============================================================
-#
-# from is2retreat.config import Params
-# from is2retreat.preprocessing import load_shoreline, load_beams, build_boxes_for_families, apply_preprocessing_to_clipped
-#
-# P = Params()
-# shoreline_gdf = load_shoreline(shoreline_fp)
-# dataset_raw = load_beams(input_folder, utm_epsg=UTM_EPSG)
-#
-# dataset_clean = build_boxes_for_families(
-#     dataset_raw, shoreline_gdf,
-#     utm_epsg=UTM_EPSG,
-#     half_along=P.HALF_ALONG_M,
-#     half_across=P.HALF_ACROSS_M,
-#     families=P.GTX,
-# )
-#
-# dataset_raw2, summary_raw, flagged_df = apply_preprocessing_to_clipped(
-#     dataset_clipped,
-#     min_points_pct=P.MIN_POINTS_PCT,
-#     elev_trash=P.ELEV_TRASH,
-#     too_far_beam=P.TOO_FAR_BEAM,
-#     ideal_case=P.IDEAL_CASE,
-#     return_skipped=True,
-#     verbose=False,
-# )
-#
+__all__ = [
+    "load_shoreline",
+    "load_beams",
+    "extract_date_from_filename",
+    "extract_gt_family",
+    "extract_beam_id",
+    "extract_track_number",
+    "get_middle_crossing",
+    "build_box_from_centroid",
+    "build_boxes_for_families",
+    "apply_preprocessing_to_clipped",
+    "compute_distances",
+]

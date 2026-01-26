@@ -1,0 +1,21 @@
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# Temporary/lock files
+*.lock
+*.sr.lock
+
+# Logs
+*.log

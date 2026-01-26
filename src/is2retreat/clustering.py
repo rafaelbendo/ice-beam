@@ -13,6 +13,12 @@ Several downstream steps (bias filtering, bluff extraction) depend on this exact
 format and commonly do things like: [b[1] for b in beam_ids].
 
 Do NOT refactor `beam_ids` into plain strings unless you update ALL consumers.
+
+NEW (FIX)
+---------
+Buffers are now built per (beam_id, acq_date) cycle. The old behavior grouped only
+by beam_id and accidentally connected points from different cycles into one "mega"
+centerline, collapsing clusters.
 """
 
 from typing import Dict, List, Optional, Tuple, Union
@@ -45,14 +51,16 @@ def make_clusters(
 ) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
     """
     Create clusters of beams for each gt_family using buffered centerlines.
-    Each beam becomes a polygon buffer around a centerline, and clusters are
-    defined by intersecting polygons.
 
-    Adds cluster center coordinates (lat/lon).
+    FIXED BEHAVIOR:
+      - Build buffers per (beam_id, acq_date) cycle.
 
-    Notes
-    -----
-    `beam_ids` are stored as (gt_family, beam_id) tuples. Keep this.
+    Legacy behavior kept:
+      - clusters_gdf["beam_ids"] is a list of (gt_family, beam_id) tuples.
+
+    Adds:
+      - cycle_date (normalized date) on each cluster polygon row
+      - cluster center lat/lon
     """
 
     # Params defaults (only if values not explicitly provided)
@@ -71,66 +79,95 @@ def make_clusters(
     if utm_epsg is None:
         utm_epsg = 32606
 
-    target_crs = f"EPSG:{int(utm_epsg)}"
+    cluster_distance_m = float(cluster_distance_m)
+    min_beams = int(min_beams)
+    utm_epsg = int(utm_epsg)
+
+    target_crs = f"EPSG:{utm_epsg}"
 
     clusters: List[gpd.GeoDataFrame] = []
-    beam_lines: Dict[Tuple[str, str], LineString] = {}
+
+    # We store centerlines per cycle for intersection queries, but we will
+    # collapse to legacy (fam, beam_id) tuples when writing clusters_gdf["beam_ids"].
+    beam_lines: Dict[Tuple[str, str, pd.Timestamp], LineString] = {}
     cluster_id_counter = 1
 
     for fam, content in dataset_clean.items():
         if not content or content.get("box") is None:
             continue
 
+        fam = str(fam).strip()
+
         # Oriented box for this family
         box_gdf = content["box"]
-        box_utm = box_gdf.to_crs(int(utm_epsg)) if str(box_gdf.crs) != target_crs else box_gdf
+        box_utm = box_gdf.to_crs(utm_epsg) if str(box_gdf.crs) != target_crs else box_gdf
         box_geom = box_utm.geometry.iloc[0]
 
         # Points source
         if pts_gdf is not None:
-            fam_pts = pts_gdf.loc[pts_gdf["gt_family"] == fam].copy()
+            fam_pts = pts_gdf.loc[pts_gdf["gt_family"].astype(str).str.strip() == fam].copy()
         else:
             fam_pts = content.get("clipped", gpd.GeoDataFrame()).copy()
 
-        if fam_pts.empty:
+        if fam_pts is None or fam_pts.empty:
             continue
 
         # CRS harmonization
         if fam_pts.crs is None or str(fam_pts.crs) != target_crs:
-            fam_pts = fam_pts.to_crs(int(utm_epsg))
+            fam_pts = fam_pts.to_crs(utm_epsg)
+
+        # Ensure datetime exists if present
+        if "acq_date" in fam_pts.columns:
+            fam_pts["acq_date"] = pd.to_datetime(fam_pts["acq_date"], errors="coerce")
+        else:
+            # If acq_date missing, we can't do per-cycle clustering safely.
+            # Fall back to old behavior but warn via column.
+            fam_pts["acq_date"] = pd.NaT
+
+        fam_pts["beam_id"] = fam_pts["beam_id"].astype(str).str.strip()
 
         # Keep only points inside/touching box
         fam_pts = fam_pts[fam_pts.geometry.within(box_geom) | fam_pts.geometry.touches(box_geom)]
         if fam_pts.empty:
             continue
 
-        # Build centerlines per beam + buffer polygons
-        for beam_id, g in fam_pts.groupby("beam_id"):
+        # ------------------------------------------------------------
+        # Build centerlines per (beam_id, acq_date) cycle
+        # ------------------------------------------------------------
+        # If acq_date is all NaT, this becomes one big group per beam_id,
+        # but at least it's explicit and debuggable.
+        for (beam_id, acq_date), g in fam_pts.groupby(["beam_id", "acq_date"]):
             if len(g) < 2:
                 continue
 
+            # normalize cycle_date for consistent grouping/labels
+            cycle_date = pd.to_datetime(acq_date, errors="coerce")
+            if pd.notna(cycle_date):
+                cycle_date = cycle_date.normalize()
+
             g_sorted = (
                 g.assign(_y=g.geometry.y)
-                .sort_values("_y")
-                .drop(columns="_y")
+                 .sort_values("_y")
+                 .drop(columns="_y")
             )
 
             line = LineString(g_sorted.geometry.values)
             if line.length == 0:
                 continue
 
-            key = (str(fam), str(beam_id))
+            key = (fam, str(beam_id), cycle_date)
             beam_lines[key] = line
 
-            poly = line.buffer(float(cluster_distance_m) / 2.0)
+            poly = line.buffer(cluster_distance_m / 2.0)
 
             clusters.append(
                 gpd.GeoDataFrame(
                     {
-                        "gt_family": [str(fam)],
+                        "gt_family": [fam],
                         "beam_id": [str(beam_id)],
+                        "cycle_date": [cycle_date],  # NEW: per-cycle stamp
                         "num_points": [int(len(g))],
-                        "cluster_distance_m": [float(cluster_distance_m)],
+                        "cluster_distance_m": [cluster_distance_m],
                         "cluster_id": [int(cluster_id_counter)],
                     },
                     geometry=[poly],
@@ -146,34 +183,50 @@ def make_clusters(
 
     clusters_gdf = gpd.GeoDataFrame(pd.concat(clusters, ignore_index=True), crs=target_crs)
 
-    # Beam centerlines
+    # ------------------------------------------------------------
+    # Beam centerlines GeoDataFrame (per-cycle)
+    # ------------------------------------------------------------
     if beam_lines:
         beam_gdf = gpd.GeoDataFrame(
             {
-                "fam_beam": list(beam_lines.keys()),  # (gt_family, beam_id)
-                "gt_family": [fb[0] for fb in beam_lines.keys()],
-                "beam_id": [fb[1] for fb in beam_lines.keys()],
+                "fam_beam_cycle": list(beam_lines.keys()),  # (gt_family, beam_id, cycle_date)
+                "gt_family": [k[0] for k in beam_lines.keys()],
+                "beam_id": [k[1] for k in beam_lines.keys()],
+                "cycle_date": [k[2] for k in beam_lines.keys()],
+                # legacy tuple also available if you want it
+                "fam_beam": [(k[0], k[1]) for k in beam_lines.keys()],
             },
             geometry=list(beam_lines.values()),
             crs=target_crs,
         )
     else:
         beam_gdf = gpd.GeoDataFrame(
-            columns=["fam_beam", "gt_family", "beam_id", "geometry"],
+            columns=["fam_beam_cycle", "gt_family", "beam_id", "cycle_date", "fam_beam", "geometry"],
             crs=target_crs,
         )
 
-    # Beams intersecting each buffer polygon
-    # NOTE: `beam_ids` are stored as (gt_family, beam_id) tuples on purpose.
-    clusters_gdf["beam_ids"] = [
-        beam_gdf.loc[beam_gdf.intersects(row.geometry), "fam_beam"].tolist()
-        for _, row in clusters_gdf.iterrows()
-    ]
+    # ------------------------------------------------------------
+    # Which beams intersect each polygon?
+    # IMPORTANT: store legacy tuples (fam, beam_id) in clusters_gdf["beam_ids"]
+    # ------------------------------------------------------------
+    beam_ids_legacy: List[list] = []
+    for _, row in clusters_gdf.iterrows():
+        hits = beam_gdf.loc[beam_gdf.intersects(row.geometry), "fam_beam"].tolist()
+        # drop duplicates but keep order stable
+        seen = set()
+        unique_hits = []
+        for h in hits:
+            if h not in seen:
+                seen.add(h)
+                unique_hits.append(h)
+        beam_ids_legacy.append(unique_hits)
+
+    clusters_gdf["beam_ids"] = beam_ids_legacy
     clusters_gdf["num_beams"] = clusters_gdf["beam_ids"].apply(len)
 
-    # Optional filter by required minimum beams
-    if isinstance(min_beams, (int, np.integer)) and int(min_beams) > 1:
-        clusters_gdf = clusters_gdf.loc[clusters_gdf["num_beams"] >= int(min_beams)].copy()
+    # Filter by required minimum beams
+    if min_beams > 1:
+        clusters_gdf = clusters_gdf.loc[clusters_gdf["num_beams"] >= min_beams].copy()
 
     # Cluster center lat/lon (centroid computed in UTM, then projected to 4326)
     clusters_gdf["cluster_center"] = clusters_gdf.geometry.centroid
@@ -198,42 +251,32 @@ def _union_all(geoseries):
 
 
 def angle_between(v1: np.ndarray, v2: np.ndarray) -> float:
-    """Angle between vectors (acute, 0–90°)."""
     dot = float(np.dot(v1, v2))
     denom = float(np.linalg.norm(v1) * np.linalg.norm(v2))
     if denom == 0:
         return np.nan
-
     cosang = np.clip(dot / denom, -1.0, 1.0)
     ang = float(np.degrees(np.arccos(cosang)))
     return ang if ang <= 90.0 else 180.0 - ang
 
 
 def extract_shoreline_tangent(shoreline_geom, pt, search_radius: float = 10.0) -> np.ndarray:
-    """Approximate shoreline tangent vector near the closest point."""
     proj_dist = shoreline_geom.project(pt)
-
     d1 = max(float(proj_dist) - float(search_radius), 0.0)
     d2 = min(float(proj_dist) + float(search_radius), float(shoreline_geom.length))
-
     p1 = shoreline_geom.interpolate(d1)
     p2 = shoreline_geom.interpolate(d2)
-
     return np.array([p2.x - p1.x, p2.y - p1.y], dtype=float)
 
 
 def polygon_principal_axis(poly) -> Optional[np.ndarray]:
-    """Compute dominant direction of a polygon using PCA on its exterior coords."""
     if poly is None or poly.is_empty:
         return None
-
     coords = np.array(poly.exterior.coords, dtype=float)
     if coords.shape[0] < 3:
         return None
-
     coords_centered = coords - coords.mean(axis=0)
     C = np.cov(coords_centered.T)
-
     eigenvals, eigenvecs = np.linalg.eig(C)
     idx = int(np.argmax(eigenvals))
     return eigenvecs[:, idx]
@@ -245,15 +288,8 @@ def compute_cluster_angles(
     search_radius: Optional[float] = None,
     params: Optional[object] = None,
 ) -> gpd.GeoDataFrame:
-    """
-    Compute angle between cluster dominant axis (PCA) and local shoreline tangent.
-
-    Adds column:
-      - angle_deg
-    """
     if params is not None and search_radius is None:
         search_radius = getattr(params, "ANGLE_SEARCH_RADIUS", None)
-
     if search_radius is None:
         search_radius = 10.0
 
@@ -272,7 +308,6 @@ def compute_cluster_angles(
     shoreline_geom = _union_all(shoreline.geometry)
 
     angle_vals: List[float] = []
-
     for _, row in clusters_gdf.iterrows():
         poly = row.geometry
         if poly is None or poly.is_empty:
@@ -286,7 +321,6 @@ def compute_cluster_angles(
 
         nearest = nearest_points(poly, shoreline_geom)[1]
         v_shore = extract_shoreline_tangent(shoreline_geom, nearest, search_radius=float(search_radius))
-
         angle_vals.append(angle_between(v_cluster, v_shore))
 
     out = clusters_gdf.copy()
@@ -303,17 +337,11 @@ def select_clusters_per_family(
     track_id: Optional[str] = None,
     params: Optional[object] = None,
 ) -> Tuple[gpd.GeoDataFrame, Dict[str, List[int]], pd.DataFrame]:
-    """
-    Greedy cluster selection per gt_family.
-
-    Rule:
-      - select a cluster only if it adds at least one new beam
-        not already covered by previously selected clusters.
-    """
     if params is not None and min_beams is None:
         min_beams = getattr(params, "MIN_BEAMS", None)
     if min_beams is None:
         min_beams = 2
+    min_beams = int(min_beams)
 
     if clusters_gdf is None or clusters_gdf.empty:
         empty_gdf = gpd.GeoDataFrame(
@@ -342,7 +370,6 @@ def select_clusters_per_family(
         fam_clusters = fam_clusters.copy()
         total = len(fam_clusters)
 
-        # Track id priority: column -> arg -> None
         fam_track = None
         if "track_id" in fam_clusters.columns and fam_clusters["track_id"].notna().any():
             modes = fam_clusters["track_id"].mode()
@@ -350,14 +377,12 @@ def select_clusters_per_family(
         elif track_id is not None:
             fam_track = track_id
 
-        # Clusters that fail min_beams
         too_few_ids: List[int] = []
         if "num_beams" in fam_clusters.columns:
-            too_few_ids = fam_clusters.loc[fam_clusters["num_beams"] < int(min_beams), "cluster_id"].astype(int).tolist()
+            too_few_ids = fam_clusters.loc[fam_clusters["num_beams"] < min_beams, "cluster_id"].astype(int).tolist()
 
-        # Eligible clusters
         if "num_beams" in fam_clusters.columns:
-            fam_core = fam_clusters.loc[fam_clusters["num_beams"] >= int(min_beams)].copy()
+            fam_core = fam_clusters.loc[fam_clusters["num_beams"] >= min_beams].copy()
         else:
             fam_core = fam_clusters.copy()
 
