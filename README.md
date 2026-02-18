@@ -87,15 +87,15 @@ Bad or No data
 :: Writes one output notebook per track into: papermill_runs\
 :: ================================================================
 
-:: (1) Make sure output folder exists
-if not exist "papermill_runs" mkdir "papermill_runs"
+:: (1) Make sure output folder exists if not exist "papermill_runs" run: 
+mkdir "papermill_runs"
 
 :: (2) Loop through tracks and run Papermill
-for /f "usebackq delims=" %t in ("tracks_filtered.txt") do (
-  echo Running TRACK_ID=%t
+for /f "usebackq delims=" %t in ("tracks_filtered.txt") do (echo Running TRACK_ID=%t
   papermill "MiddleBluff_Final7Multitracks.ipynb" "papermill_runs\MiddleBluff_Final7Multitracks_out_%t.ipynb" ^
     -p TRACK_ID "%t" ^
     -p MASTER_OUTFILE "C:\coding\arctic\paper1\Notebook\Sanity\test\Final_run_MASTER2.csv"
 )
 
+for /f "usebackq delims=" %t in ("tracks_filtered2.txt") do papermill "MiddleBluff_Final7Multitracks.ipynb" "papermill_runs\MiddleBluff_Final7Multitracks_out_%t.ipynb" -p TRACK_ID "%t" -p MASTER_OUTFILE "C:\coding\arctic\paper1\Notebook\Sanity\test\Final_run_MASTER2.csv"
 # logos
