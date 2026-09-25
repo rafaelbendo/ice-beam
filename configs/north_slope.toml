@@ -2,9 +2,9 @@
 # Relative paths are resolved against this file's folder.
 
 [paths]
-aoi_path            = "/Users/rafael/code/arctic/shp/coastline_NSAK_3Buffer.shp"
-shoreline_path      = "/Users/rafael/code/arctic/shp/coastline_NSAK_3.shp"
-is2_tracks_path     = "/Users/rafael/code/arctic/shp/IS2_tracks.shp"
+aoi_path            = "../inputs/coastline_NSAK_3Buffer.shp"
+shoreline_path      = "../inputs/coastline_NSAK_3.shp"
+is2_tracks_path     = "../inputs/IS2_tracks.shp"
 sliderule_cache_dir = "/Users/rafael/code/arctic/data"
 outdir              = "../outputs"
 

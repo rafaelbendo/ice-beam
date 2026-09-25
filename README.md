@@ -53,11 +53,13 @@ That is why this framework groups beams into the smallest possible clusters, so 
 
 # Input data
 
-The pipeline needs three input layers (paths set in `configs/north_slope.toml`):
+The pipeline needs three input layers. The North Slope versions are included in `inputs/` and are already set in `configs/north_slope.toml`:
 
-- **Coastline** with a `CoastType` field (1 = bluff)
-- **AOI polygon** used to limit the SlideRule request
-- **ICESat-2 reference ground tracks** (field `Name` = RGT number)
+| File | Layer |
+|---|---|
+| `inputs/coastline_NSAK_3.shp` | **Coastline** with a `CoastType` field (1 = bluff) |
+| `inputs/coastline_NSAK_3Buffer.shp` | **AOI polygon** (buffered coastline) used to limit the SlideRule request |
+| `inputs/IS2_tracks.shp` | **ICESat-2 reference ground tracks** (field `Name` = RGT number) |
 
 ICESat-2 elevations are requested from SlideRule per track and cached locally; see `notebooks/00_sliderule_data.ipynb`. Tracks with no data or no bluff-shoreline crossing are skipped.
 
