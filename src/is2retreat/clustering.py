@@ -1,478 +1,592 @@
-# src/is2retreat/clustering.py
+# ============================================================
+# Lateral-growth clustering with vertical-bias control
+# ============================================================
+"""
+For each ``gt_family``, beam positions are evaluated at a common offshore
+distance ``xm`` to define lateral order. Clustering starts at one outer
+lateral boundary and grows inward using the first beam as the reference,
+then restarts from the opposite boundary.
+
+A candidate beam is added only when it brackets ``x0``, has a new acquisition
+date in the current cluster, and satisfies
+``abs(elev_candidate(x0) - elev_reference(x0)) <= bias_tolerance``.
+Same-date candidates are skipped without stopping growth; a candidate that
+fails the bias tolerance (or exceeds ``size_limit`` meters of lateral width)
+becomes the breakpoint and starts the next cluster. Clusters smaller than
+``min_profiles`` are discarded.
+"""
 from __future__ import annotations
-
-"""
-Clustering (buffered centerlines) + cluster/shoreline angle + selection.
-
-IMPORTANT (legacy contract)
---------------------------
-Clusters store physical beam identifiers as (gt_family, beam_id) tuples in `beam_ids`.
-Downstream code depends on this. Do NOT change that contract without updating all consumers.
-
-NEW (your intent)
------------------
-You want MIN_BEAMS to mean minimum number of "files" (acquisitions), where a file is:
-  (gt_family, beam_id, cycle_date)
-
-We store those in:
-  - acq_ids : list[(gt_family, beam_id, cycle_date)]
-  - num_acq : len(acq_ids)
-
-Selection
----------
-We implement your original greedy selection logic, but applied to acquisitions (acq_ids),
-not physical beams (beam_ids). This avoids the "1 cluster per family" collapse.
-"""
-
-from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import LineString
-from shapely.ops import nearest_points
+from shapely.geometry import LineString, Point
+from shapely.ops import unary_union
+
+from .utils import cluster_member_beams
 
 
-# ============================================================
-# Clustering (buffered centerlines)
-# ============================================================
-def make_clusters(
-    dataset_clean: Dict[str, Dict[str, object]],
-    cluster_distance_m: Optional[float] = None,
-    pts_gdf: Optional[gpd.GeoDataFrame] = None,
-    min_beams: Optional[int] = None,   # interpreted as min acquisitions/files
-    utm_epsg: Optional[int] = None,
-    params: Optional[object] = None,
-) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
+def _as_utm_gdf(gdf, utm_epsg):
+    if gdf is None or gdf.empty:
+        return gpd.GeoDataFrame(columns=["geometry"], geometry="geometry", crs=f"EPSG:{utm_epsg}")
+    out = gpd.GeoDataFrame(gdf.copy(), geometry="geometry", crs=gdf.crs)
+    target = f"EPSG:{utm_epsg}"
+    if out.crs is None:
+        out = out.set_crs(target, allow_override=True)
+    elif str(out.crs) != target:
+        out = out.to_crs(target)
+    return out
+
+
+def beam_position_at_xm(bdf, xm, dist_col="distance_from_offshore"):
+    """Interpolated beam map position at xm; no extrapolation."""
+    if bdf is None or bdf.empty or dist_col not in bdf.columns:
+        return None
+
+    p = bdf.dropna(subset=[dist_col, "geometry"]).copy()
+    if len(p) < 2:
+        return None
+
+    p[dist_col] = pd.to_numeric(p[dist_col], errors="coerce")
+    p["gx"] = p.geometry.x
+    p["gy"] = p.geometry.y
+    p = p.dropna(subset=[dist_col, "gx", "gy"])
+    if len(p) < 2:
+        return None
+
+    p = (
+        p.groupby(dist_col, as_index=False)
+         .agg(gx=("gx", "mean"), gy=("gy", "mean"))
+         .sort_values(dist_col)
+    )
+    if len(p) < 2:
+        return None
+
+    d = p[dist_col].to_numpy(dtype=float)
+    x = p["gx"].to_numpy(dtype=float)
+    y = p["gy"].to_numpy(dtype=float)
+
+    if not (np.nanmin(d) <= xm <= np.nanmax(d)):
+        return None
+
+    return Point(float(np.interp(xm, d, x)), float(np.interp(xm, d, y)))
+
+
+def interpolate_elevation_at_x0(prof, x0,
+                                x_col="distance_from_offshore",
+                                y_col="h_li"):
+    """Interpolate h_li at x0 only when the profile brackets x0."""
+    if prof is None or prof.empty or x_col not in prof.columns or y_col not in prof.columns:
+        return np.nan
+
+    p = prof.dropna(subset=[x_col, y_col]).copy()
+    if len(p) < 2:
+        return np.nan
+
+    p[x_col] = pd.to_numeric(p[x_col], errors="coerce")
+    p[y_col] = pd.to_numeric(p[y_col], errors="coerce")
+    p = p.dropna(subset=[x_col, y_col])
+    if len(p) < 2:
+        return np.nan
+
+    p = (
+        p.groupby(x_col, as_index=False)[y_col]
+         .mean()
+         .sort_values(x_col)
+    )
+    if len(p) < 2:
+        return np.nan
+
+    xx = p[x_col].to_numpy(dtype=float)
+    yy = p[y_col].to_numpy(dtype=float)
+    if not (np.nanmin(xx) <= x0 <= np.nanmax(xx)):
+        return np.nan
+
+    return float(np.interp(x0, xx, yy))
+
+
+def _beam_acq_date(bdf):
+    if bdf is None or bdf.empty or "acq_date" not in bdf.columns:
+        return pd.NaT
+    vals = pd.to_datetime(bdf["acq_date"], errors="coerce").dropna()
+    return vals.iloc[0].normalize() if len(vals) else pd.NaT
+
+
+def _beam_line(bdf):
+    p = bdf.dropna(subset=["geometry"]).copy()
+    if len(p) < 2:
+        return None
+    sort_col = "distance_from_offshore" if "distance_from_offshore" in p.columns else None
+    if sort_col is not None:
+        p[sort_col] = pd.to_numeric(p[sort_col], errors="coerce")
+        p = p.dropna(subset=[sort_col]).sort_values(sort_col)
+    else:
+        p = p.assign(_y=p.geometry.y).sort_values("_y")
+    coords = [(geom.x, geom.y) for geom in p.geometry if geom is not None and not geom.is_empty]
+    if len(coords) < 2:
+        return None
+    line = LineString(coords)
+    return line if not line.is_empty and line.length > 0 else None
+
+
+def lateral_order_beams(fam_pts, xm, x0):
+    """Lateral ordering of beams from their positions at a common offshore distance."""
+    records = []
+    for beam_id, bdf in fam_pts.groupby("beam_id"):
+        pos = beam_position_at_xm(bdf, xm=xm)
+        if pos is None:
+            continue
+        records.append({
+            "beam_id": str(beam_id).strip(),
+            "geometry": pos,
+            "x_xm": pos.x,
+            "y_xm": pos.y,
+            "acq_date": _beam_acq_date(bdf),
+            "elev_x0": interpolate_elevation_at_x0(bdf, x0=x0),
+            "n_points": len(bdf)
+        })
+
+    if not records:
+        return pd.DataFrame(columns=["beam_id", "cross_track_pos"])
+
+    order_df = pd.DataFrame(records)
+    coords = order_df[["x_xm", "y_xm"]].to_numpy(dtype=float)
+
+    if len(order_df) == 1:
+        order_df["cross_track_pos"] = 0.0
+    else:
+        centered = coords - coords.mean(axis=0)
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        axis = vh[0]
+        order_df["cross_track_pos"] = centered @ axis
+
+    return order_df.sort_values("cross_track_pos").reset_index(drop=True)
+
+
+def grow_clusters_from_side(order_df,
+                            fam_pts,
+                            bias_tolerance,
+                            side="left",
+                            min_profiles=2,
+                            size_limit=None):
     """
-    Create clusters per (gt_family, beam_id, acq_date) by buffering a per-cycle centerline.
+    Grow clusters inward from one lateral boundary.
 
-    Outputs clusters_gdf with:
-      - beam_ids (legacy): list[(gt_family, beam_id)]
-      - acq_ids          : list[(gt_family, beam_id, cycle_date)]   <-- "files"
-      - num_beams        : len(beam_ids)
-      - num_acq          : len(acq_ids)
+    Same-date candidates are skipped and do not stop growth. A candidate that
+    fails the vertical-bias test becomes the breakpoint/reference for the next
+    cluster.
 
-    Filtering:
-      - min_beams is treated as min acquisitions/files => keep clusters where num_acq >= min_beams
+    If size_limit is not None, it is the maximum cluster width in meters
+    along the lateral cross-track axis.
     """
-    # Params defaults
-    if params is not None:
-        if cluster_distance_m is None:
-            cluster_distance_m = getattr(params, "CLUSTER_DISTANCE_M", None)
-        if min_beams is None:
-            min_beams = getattr(params, "MIN_BEAMS", 2)
-        if utm_epsg is None:
-            utm_epsg = getattr(params, "UTM_EPSG", 32606)
+    if order_df is None or order_df.empty:
+        return []
 
-    if cluster_distance_m is None:
-        raise ValueError("cluster_distance_m must be provided (or via params.CLUSTER_DISTANCE_M).")
-    if min_beams is None:
-        min_beams = 2
-    if utm_epsg is None:
-        utm_epsg = 32606
+    ordered = order_df.sort_values("cross_track_pos").copy()
+    if side in ("right", "max", "opposite"):
+        ordered = ordered.iloc[::-1].reset_index(drop=True)
+    else:
+        ordered = ordered.reset_index(drop=True)
 
-    cluster_distance_m = float(cluster_distance_m)
-    min_beams = int(min_beams)
-    utm_epsg = int(utm_epsg)
+    profiles = {str(bid).strip(): g.copy() for bid, g in fam_pts.groupby("beam_id")}
 
+    clusters = []
+    current = []
+    current_dates = set()
+    ref_beam = None
+    ref_elev = np.nan
+    ref_pos = np.nan
+
+    def finalize_current(reason):
+        if len(current) >= min_profiles:
+            clusters.append({
+                "growth_side": side,
+                "reference_beam": ref_beam,
+                "beam_ids_ordered": current.copy(),
+                "num_beams": len(current),
+                "break_reason": reason,
+                "reference_elev_x0": ref_elev
+            })
+
+    for _, row in ordered.iterrows():
+        bid = str(row["beam_id"]).strip()
+        prof = profiles.get(bid)
+        elev = row.get("elev_x0", np.nan)
+        acq_date = row.get("acq_date", pd.NaT)
+        cross_pos = row.get("cross_track_pos", np.nan)
+
+        if prof is None or prof.empty:
+            continue
+
+        if not np.isfinite(elev):
+            # Bias cannot be evaluated without bracketing x0. This is not a
+            # breakpoint because there is no valid bias failure to anchor on.
+            continue
+
+        if not current:
+            ref_beam = bid
+            ref_elev = elev
+            ref_pos = cross_pos
+            current = [bid]
+            current_dates = set()
+            if pd.notna(acq_date):
+                current_dates.add(acq_date)
+            continue
+
+        if pd.notna(acq_date) and acq_date in current_dates:
+            continue
+
+        bias = elev - ref_elev
+        if abs(bias) <= bias_tolerance:
+            candidate_width = abs(cross_pos - ref_pos)
+
+            if size_limit is not None and candidate_width > size_limit:
+                finalize_current("size_limit")
+                ref_beam = bid
+                ref_elev = elev
+                ref_pos = cross_pos
+                current = [bid]
+                current_dates = set()
+                if pd.notna(acq_date):
+                    current_dates.add(acq_date)
+            else:
+                current.append(bid)
+                if pd.notna(acq_date):
+                    current_dates.add(acq_date)
+        else:
+            finalize_current("bias_breakpoint")
+            ref_beam = bid
+            ref_elev = elev
+            ref_pos = cross_pos
+            current = [bid]
+            current_dates = set()
+            if pd.notna(acq_date):
+                current_dates.add(acq_date)
+
+    finalize_current("end_of_family")
+    return clusters
+
+
+def _cluster_geometry(member_lines):
+    member_lines = [geom for geom in member_lines if geom is not None and not geom.is_empty]
+    if not member_lines:
+        return None
+    merged = unary_union(member_lines)
+    hull = merged.convex_hull
+    if hull.geom_type in ("LineString", "MultiLineString"):
+        return hull.buffer(1.0)
+    if hull.geom_type == "Point":
+        return hull.buffer(1.0)
+    return hull
+
+
+def make_clusters(pts_gdf,
+                  utm_epsg,
+                  bias_tolerance,
+                  xm,
+                  x0,
+                  track_id=None,
+                  min_beams=2,
+                  size_limit=None,
+                  cluster_distance_m=None):
+    """
+    Create clusters by lateral growth plus vertical-bias control.
+
+    cluster_distance_m is legacy metadata only (the old buffered clustering
+    used it); it is written to the output but does not affect clustering.
+
+    Returns
+    -------
+    clusters_gdf, beam_gdf
+    """
     target_crs = f"EPSG:{utm_epsg}"
-    clusters: List[gpd.GeoDataFrame] = []
+    if cluster_distance_m is None:
+        cluster_distance_m = np.nan
+    source = _as_utm_gdf(pts_gdf, utm_epsg=utm_epsg)
 
-    # per-cycle centerlines
-    beam_lines: Dict[Tuple[str, str, pd.Timestamp], LineString] = {}
+    rows = []
+    beam_line_rows = []
     cluster_id_counter = 1
 
-    for fam, content in dataset_clean.items():
-        if not content or content.get("box") is None:
-            continue
+    fams = sorted(source["gt_family"].dropna().astype(str).unique()) if "gt_family" in source.columns else []
 
-        fam = str(fam).strip()
-
-        # family box
-        box_gdf = content["box"]
-        box_utm = box_gdf.to_crs(utm_epsg) if str(box_gdf.crs) != target_crs else box_gdf
-        box_geom = box_utm.geometry.iloc[0]
-
-        # points source
-        if pts_gdf is not None:
-            fam_pts = pts_gdf.loc[pts_gdf["gt_family"].astype(str).str.strip() == fam].copy()
-        else:
-            fam_pts = content.get("clipped", gpd.GeoDataFrame()).copy()
-
-        if fam_pts is None or fam_pts.empty:
-            continue
-
-        # CRS harmonization
-        if fam_pts.crs is None or str(fam_pts.crs) != target_crs:
-            fam_pts = fam_pts.to_crs(utm_epsg)
-
-        # required columns
-        if "beam_id" not in fam_pts.columns:
-            raise ValueError("Points GeoDataFrame must have a 'beam_id' column.")
-        fam_pts["beam_id"] = fam_pts["beam_id"].astype(str).str.strip()
-
-        if "acq_date" in fam_pts.columns:
-            fam_pts["acq_date"] = pd.to_datetime(fam_pts["acq_date"], errors="coerce")
-        else:
-            fam_pts["acq_date"] = pd.NaT
-
-        # within/touch box
-        fam_pts = fam_pts[fam_pts.geometry.within(box_geom) | fam_pts.geometry.touches(box_geom)]
+    for fam in fams:
+        fam_pts = source[source["gt_family"].astype(str) == fam].copy()
         if fam_pts.empty:
             continue
 
-        # Build per (beam_id, acq_date) centerlines + buffered polygons
-        for (beam_id, acq_date), g in fam_pts.groupby(["beam_id", "acq_date"]):
-            if len(g) < 2:
+        fam_pts["beam_id"] = fam_pts["beam_id"].astype(str).str.strip()
+        if "acq_date" in fam_pts.columns:
+            fam_pts["acq_date"] = pd.to_datetime(fam_pts["acq_date"], errors="coerce").dt.normalize()
+
+        order_df = lateral_order_beams(fam_pts, xm=xm, x0=x0)
+        if order_df.empty:
+            continue
+
+        line_lookup = {}
+        for beam_id, bdf in fam_pts.groupby("beam_id"):
+            line = _beam_line(bdf)
+            if line is None:
                 continue
+            bid = str(beam_id).strip()
+            line_lookup[bid] = line
+            beam_line_rows.append({
+                "fam_beam": (fam, bid),
+                "gt_family": fam,
+                "beam_id": bid,
+                "geometry": line
+            })
 
-            cycle_date = pd.to_datetime(acq_date, errors="coerce")
-            if pd.notna(cycle_date):
-                cycle_date = cycle_date.normalize()
-
-            g_sorted = (
-                g.assign(_y=g.geometry.y)
-                 .sort_values("_y")
-                 .drop(columns="_y")
+        for side in ["left", "right"]:
+            grown = grow_clusters_from_side(
+                order_df=order_df,
+                fam_pts=fam_pts,
+                bias_tolerance=bias_tolerance,
+                side=side,
+                min_profiles=min_beams,
+                size_limit=size_limit
             )
 
-            line = LineString(g_sorted.geometry.values)
-            if line.length == 0:
-                continue
+            for cl in grown:
+                beam_ids = [str(b).strip() for b in cl["beam_ids_ordered"]]
+                member_lines = [line_lookup.get(b) for b in beam_ids]
+                geom = _cluster_geometry(member_lines)
+                if geom is None:
+                    continue
 
-            key = (fam, str(beam_id), cycle_date)
-            beam_lines[key] = line
+                ref_beam = str(cl["reference_beam"]).strip()
+                member_points = fam_pts[fam_pts["beam_id"].isin(beam_ids)]
+                center = geom.centroid
+                rows.append({
+                    "track_id": track_id,
+                    "gt_family": fam,
+                    "beam_id": ref_beam,
+                    "reference_beam": ref_beam,
+                    "beam_ids": [(fam, b) for b in beam_ids],
+                    "beam_ids_ordered": beam_ids,
+                    "num_beams": len(beam_ids),
+                    "num_points": int(len(member_points)),
+                    "cluster_distance_m": cluster_distance_m,
+                    "cluster_id": cluster_id_counter,
+                    "growth_side": cl["growth_side"],
+                    "break_reason": cl["break_reason"],
+                    "reference_elev_x0": cl["reference_elev_x0"],
+                    "cluster_center": center,
+                    "geometry": geom
+                })
+                cluster_id_counter += 1
 
-            poly = line.buffer(cluster_distance_m / 2.0)
+    if rows:
+        clusters_gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=target_crs)
 
-            clusters.append(
-                gpd.GeoDataFrame(
-                    {
-                        "gt_family": [fam],
-                        "beam_id": [str(beam_id)],
-                        "cycle_date": [cycle_date],
-                        "num_points": [int(len(g))],
-                        "cluster_distance_m": [cluster_distance_m],
-                        "cluster_id": [int(cluster_id_counter)],
-                    },
-                    geometry=[poly],
-                    crs=target_crs,
-                )
-            )
-            cluster_id_counter += 1
+        # GeoPandas can lose CRS context on an object column of centroid Points,
+        # so convert the centroid column as an explicit GeoSeries.
+        centers_ll = gpd.GeoSeries(
+            clusters_gdf["cluster_center"],
+            crs=target_crs
+        ).to_crs(4326)
 
-    if not clusters:
-        empty_clusters = gpd.GeoDataFrame(columns=["cluster_id"], crs=target_crs)
-        empty_beams = gpd.GeoDataFrame(columns=["gt_family", "beam_id", "geometry"], crs=target_crs)
-        return empty_clusters, empty_beams
-
-    clusters_gdf = gpd.GeoDataFrame(pd.concat(clusters, ignore_index=True), crs=target_crs)
-
-    # Beam centerlines GeoDataFrame (per-cycle)
-    if beam_lines:
-        beam_gdf = gpd.GeoDataFrame(
-            {
-                "fam_beam_cycle": list(beam_lines.keys()),  # (gt_family, beam_id, cycle_date)
-                "gt_family": [k[0] for k in beam_lines.keys()],
-                "beam_id": [k[1] for k in beam_lines.keys()],
-                "cycle_date": [k[2] for k in beam_lines.keys()],
-                "fam_beam": [(k[0], k[1]) for k in beam_lines.keys()],  # legacy
-            },
-            geometry=list(beam_lines.values()),
-            crs=target_crs,
+        clusters_gdf["center_lon"] = centers_ll.x.values
+        clusters_gdf["center_lat"] = centers_ll.y.values
+        clusters_gdf = clusters_gdf.set_geometry("geometry")
+    else:
+        clusters_gdf = gpd.GeoDataFrame(
+            columns=[
+                "track_id", "gt_family", "beam_id", "reference_beam", "beam_ids",
+                "beam_ids_ordered", "num_beams", "num_points", "cluster_distance_m",
+                "cluster_id", "growth_side", "break_reason", "reference_elev_x0",
+                "cluster_center", "center_lon", "center_lat", "geometry"
+            ],
+            geometry="geometry",
+            crs=target_crs
         )
+
+    if beam_line_rows:
+        beam_gdf = gpd.GeoDataFrame(beam_line_rows, geometry="geometry", crs=target_crs)
     else:
         beam_gdf = gpd.GeoDataFrame(
-            columns=["fam_beam_cycle", "gt_family", "beam_id", "cycle_date", "fam_beam", "geometry"],
-            crs=target_crs,
+            columns=["fam_beam", "gt_family", "beam_id", "geometry"],
+            geometry="geometry",
+            crs=target_crs
         )
-
-    # Intersections: acquisitions + legacy beams
-    beam_ids_legacy: List[list] = []
-    acq_ids: List[list] = []
-
-    for _, row in clusters_gdf.iterrows():
-        hit_acq = beam_gdf.loc[beam_gdf.intersects(row.geometry), "fam_beam_cycle"].tolist()
-
-        # unique acquisitions (stable order)
-        seen_a = set()
-        uniq_acq = []
-        for a in hit_acq:
-            if a not in seen_a:
-                seen_a.add(a)
-                uniq_acq.append(a)
-        acq_ids.append(uniq_acq)
-
-        # derive unique legacy beams from acquisitions
-        seen_b = set()
-        uniq_beams = []
-        for fam0, bid0, _cyc0 in uniq_acq:
-            key = (fam0, bid0)
-            if key not in seen_b:
-                seen_b.add(key)
-                uniq_beams.append(key)
-        beam_ids_legacy.append(uniq_beams)
-
-    clusters_gdf["beam_ids"] = beam_ids_legacy
-    clusters_gdf["acq_ids"] = acq_ids
-    clusters_gdf["num_beams"] = clusters_gdf["beam_ids"].apply(len)
-    clusters_gdf["num_acq"] = clusters_gdf["acq_ids"].apply(len)
-
-    # Filter by minimum acquisitions/files (your meaning of MIN_BEAMS)
-    if min_beams > 1:
-        clusters_gdf = clusters_gdf.loc[clusters_gdf["num_acq"] >= min_beams].copy()
-
-    # Cluster center lat/lon
-    clusters_gdf["cluster_center"] = clusters_gdf.geometry.centroid
-    centers_ll = clusters_gdf.set_geometry("cluster_center").to_crs(4326)
-    clusters_gdf["center_lon"] = centers_ll.geometry.x
-    clusters_gdf["center_lat"] = centers_ll.geometry.y
-    clusters_gdf = clusters_gdf.set_geometry("geometry")
 
     return clusters_gdf, beam_gdf
 
 
-# ============================================================
-# Cluster/shoreline angle (PCA axis vs shoreline tangent)
-# ============================================================
-def _union_all(geoseries):
-    if hasattr(geoseries, "union_all"):
-        try:
-            return geoseries.union_all()
-        except Exception:
-            pass
-    return geoseries.unary_union
+# ======================================================================
+#  Selected-cluster construction
+# ======================================================================
+# Growing from both sides can produce the same beam set twice; keep one.
+
+def _cluster_beam_signature(row):
+    return "|".join(sorted(cluster_member_beams(row)))
 
 
-def angle_between(v1: np.ndarray, v2: np.ndarray) -> float:
-    dot = float(np.dot(v1, v2))
-    denom = float(np.linalg.norm(v1) * np.linalg.norm(v2))
-    if denom == 0:
-        return np.nan
-    cosang = np.clip(dot / denom, -1.0, 1.0)
-    ang = float(np.degrees(np.arccos(cosang)))
-    return ang if ang <= 90.0 else 180.0 - ang
-
-
-def extract_shoreline_tangent(shoreline_geom, pt, search_radius: float = 10.0) -> np.ndarray:
-    proj_dist = shoreline_geom.project(pt)
-    d1 = max(float(proj_dist) - float(search_radius), 0.0)
-    d2 = min(float(proj_dist) + float(search_radius), float(shoreline_geom.length))
-    p1 = shoreline_geom.interpolate(d1)
-    p2 = shoreline_geom.interpolate(d2)
-    return np.array([p2.x - p1.x, p2.y - p1.y], dtype=float)
-
-
-def polygon_principal_axis(poly) -> Optional[np.ndarray]:
-    if poly is None or poly.is_empty:
-        return None
-    coords = np.array(poly.exterior.coords, dtype=float)
-    if coords.shape[0] < 3:
-        return None
-    coords_centered = coords - coords.mean(axis=0)
-    C = np.cov(coords_centered.T)
-    eigenvals, eigenvecs = np.linalg.eig(C)
-    idx = int(np.argmax(eigenvals))
-    return eigenvecs[:, idx]
-
-
-def compute_cluster_angles(
-    clusters_gdf: gpd.GeoDataFrame,
-    shoreline: Union[gpd.GeoDataFrame, str],
-    search_radius: Optional[float] = None,
-    params: Optional[object] = None,
-) -> gpd.GeoDataFrame:
-    if params is not None and search_radius is None:
-        search_radius = getattr(params, "ANGLE_SEARCH_RADIUS", None)
-    if search_radius is None:
-        search_radius = 10.0
-
-    if clusters_gdf is None or clusters_gdf.empty:
-        out = clusters_gdf.copy()
-        out["angle_deg"] = []
-        return out
-
-    if clusters_gdf.crs is None:
-        raise ValueError("clusters_gdf has no CRS. Set a CRS before computing angles.")
-
-    if isinstance(shoreline, str):
-        shoreline = gpd.read_file(shoreline)
-
-    shoreline = shoreline.to_crs(clusters_gdf.crs)
-    shoreline_geom = _union_all(shoreline.geometry)
-
-    angle_vals: List[float] = []
-    for _, row in clusters_gdf.iterrows():
-        poly = row.geometry
-        if poly is None or poly.is_empty:
-            angle_vals.append(np.nan)
-            continue
-
-        v_cluster = polygon_principal_axis(poly)
-        if v_cluster is None or np.linalg.norm(v_cluster) == 0:
-            angle_vals.append(np.nan)
-            continue
-
-        nearest = nearest_points(poly, shoreline_geom)[1]
-        v_shore = extract_shoreline_tangent(shoreline_geom, nearest, search_radius=float(search_radius))
-        angle_vals.append(angle_between(v_cluster, v_shore))
-
-    out = clusters_gdf.copy()
-    out["angle_deg"] = np.round(angle_vals, 2)
-    return out
-
-
-# ============================================================
-# Cluster selection (greedy acquisition coverage per family)
-# ============================================================
-def select_clusters_per_family(
-    clusters_gdf: gpd.GeoDataFrame,
-    min_beams: Optional[int] = None,      # interpreted as min acquisitions/files
-    track_id: Optional[str] = None,
-    params: Optional[object] = None,
-) -> Tuple[gpd.GeoDataFrame, Dict[str, List[int]], pd.DataFrame]:
+def select_clusters_per_family(clusters_gdf, min_profiles=2, track_id=None):
     """
-    Greedy selection:
-      - Eligible if num_acq >= min_beams (your "files")
-      - Prefer clusters with more acquisitions (desc num_acq)
-      - Select ONLY if it adds at least one new acquisition not covered yet
+    Drop clusters below min_profiles and exact duplicate beam sets within
+    each gt_family (preferring more beams, then left-side growth).
 
-    Optional:
-      - if params.ANGLE_CUTOFF_DEG (or ANGLE_MAX_DEG) is defined and angle_deg exists,
-        we filter out clusters with angle_deg > cutoff BEFORE greedy selection.
+    Returns
+    -------
+    selected_clusters, skipped_dict, summary_df
     """
-    if params is not None and min_beams is None:
-        min_beams = getattr(params, "MIN_BEAMS", None)
-    if min_beams is None:
-        min_beams = 2
-    min_beams = int(min_beams)
-
-    angle_cutoff = None
-    if params is not None:
-        angle_cutoff = getattr(params, "ANGLE_CUTOFF_DEG", None)
-        if angle_cutoff is None:
-            angle_cutoff = getattr(params, "ANGLE_MAX_DEG", None)
+    empty_summary_cols = [
+        "gt_family", "track_id", "total_clusters", "selected_clusters",
+        "skipped_clusters", "too_far", "cluster_id", "angle_deg"
+    ]
 
     if clusters_gdf is None or clusters_gdf.empty:
         empty_gdf = gpd.GeoDataFrame(
             columns=["cluster_id", "gt_family", "geometry"],
             crs=getattr(clusters_gdf, "crs", None),
-            geometry="geometry",
+            geometry="geometry"
         )
-        summary_df = pd.DataFrame(
-            columns=[
-                "gt_family",
-                "track_id",
-                "total_clusters",
-                "selected_clusters",
-                "skipped_clusters",
-                "too_few_beams",
-                "representative_cluster_id",
-            ]
+        return empty_gdf, {}, pd.DataFrame(columns=empty_summary_cols)
+
+    sc = clusters_gdf.copy()
+
+    if "num_beams" in sc.columns:
+        sc = sc.loc[sc["num_beams"] >= min_profiles].copy()
+
+    if sc.empty:
+        empty_gdf = gpd.GeoDataFrame(sc, geometry="geometry", crs=clusters_gdf.crs)
+        return empty_gdf, {}, pd.DataFrame(columns=empty_summary_cols)
+
+    if "member_union_geom" not in sc.columns:
+        sc["member_union_geom"] = sc.geometry
+
+    sc["beam_signature"] = sc.apply(_cluster_beam_signature, axis=1)
+
+    if "growth_side" not in sc.columns:
+        sc["growth_side"] = None
+
+    sc["_side_rank"] = sc["growth_side"].map({"left": 0, "right": 1}).fillna(2)
+
+    sc = (
+        sc.sort_values(
+            ["gt_family", "beam_signature", "num_beams", "_side_rank", "cluster_id"],
+            ascending=[True, True, False, True, True]
         )
-        return empty_gdf, {}, summary_df
-
-    gdf = clusters_gdf.copy()
-
-    if "acq_ids" not in gdf.columns:
-        raise ValueError("clusters_gdf must include 'acq_ids'. Re-run make_clusters with updated code.")
-    if "num_acq" not in gdf.columns:
-        gdf["num_acq"] = gdf["acq_ids"].apply(lambda x: len(x) if isinstance(x, list) else 0)
-
-    # Optional angle pre-filter
-    if angle_cutoff is not None and "angle_deg" in gdf.columns:
-        gdf = gdf.loc[(gdf["angle_deg"].isna()) | (gdf["angle_deg"] <= float(angle_cutoff))].copy()
-
-    selected_list: List[gpd.GeoDataFrame] = []
-    skipped_dict: Dict[str, List[int]] = {}
-    summary_rows: List[dict] = []
-
-    for fam, fam_clusters in gdf.groupby("gt_family", sort=True):
-        fam_clusters = fam_clusters.copy()
-        total = len(fam_clusters)
-
-        fam_track = None
-        if "track_id" in fam_clusters.columns and fam_clusters["track_id"].notna().any():
-            modes = fam_clusters["track_id"].mode()
-            fam_track = modes.iat[0] if not modes.empty else fam_clusters["track_id"].dropna().iloc[0]
-        elif track_id is not None:
-            fam_track = track_id
-
-        too_few_ids = fam_clusters.loc[fam_clusters["num_acq"] < min_beams, "cluster_id"].astype(int).tolist()
-        fam_core = fam_clusters.loc[fam_clusters["num_acq"] >= min_beams].copy()
-
-        if fam_core.empty:
-            summary_rows.append(
-                {
-                    "gt_family": fam,
-                    "track_id": fam_track,
-                    "total_clusters": total,
-                    "selected_clusters": 0,
-                    "skipped_clusters": 0,
-                    "too_few_beams": len(too_few_ids),  # keep column name for compatibility
-                    "representative_cluster_id": None,
-                }
-            )
-            skipped_dict[str(fam)] = []
-            continue
-
-        # Sort: more acquisitions first, then smaller angle if available, then cluster_id
-        sort_cols = ["num_acq"]
-        asc = [False]
-        if "angle_deg" in fam_core.columns:
-            sort_cols.append("angle_deg")
-            asc.append(True)
-        sort_cols.append("cluster_id")
-        asc.append(True)
-        fam_core = fam_core.sort_values(sort_cols, ascending=asc)
-
-        covered_acq = set()
-        selected_ids: List[int] = []
-        skipped_ids: List[int] = []
-
-        for _, row in fam_core.iterrows():
-            acqs = set(row["acq_ids"]) if isinstance(row.get("acq_ids"), list) else set()
-            if acqs - covered_acq:
-                selected_ids.append(int(row["cluster_id"]))
-                covered_acq |= acqs
-            else:
-                skipped_ids.append(int(row["cluster_id"]))
-
-        fam_selected = fam_core.loc[fam_core["cluster_id"].isin(selected_ids)].copy()
-        if fam_track is not None:
-            fam_selected["track_id"] = fam_track
-
-        selected_list.append(fam_selected)
-        skipped_dict[str(fam)] = skipped_ids
-
-        summary_rows.append(
-            {
-                "gt_family": fam,
-                "track_id": fam_track,
-                "total_clusters": total,
-                "selected_clusters": len(selected_ids),
-                "skipped_clusters": len(skipped_ids),
-                "too_few_beams": len(too_few_ids),
-                "representative_cluster_id": selected_ids[0] if selected_ids else None,
-            }
-        )
-
-    selected_clusters = (
-        gpd.GeoDataFrame(pd.concat(selected_list, ignore_index=True), crs=gdf.crs)
-        if selected_list
-        else gpd.GeoDataFrame(columns=["cluster_id", "gt_family", "geometry"], crs=gdf.crs, geometry="geometry")
+        .drop_duplicates(subset=["gt_family", "beam_signature"], keep="first")
+        .drop(columns=["_side_rank"])
+        .reset_index(drop=True)
     )
 
+    skipped_dict = {}
+    summary_rows = []
+
+    for fam, fam_clusters in clusters_gdf.groupby("gt_family"):
+        fam_selected = sc[sc["gt_family"] == fam].copy()
+
+        track_val = (
+            fam_clusters["track_id"].dropna().iloc[0]
+            if "track_id" in fam_clusters.columns and fam_clusters["track_id"].notna().any()
+            else track_id
+        )
+
+        selected_ids = (
+            fam_selected["cluster_id"].tolist()
+            if "cluster_id" in fam_selected.columns
+            else []
+        )
+
+        all_ids = (
+            fam_clusters["cluster_id"].tolist()
+            if "cluster_id" in fam_clusters.columns
+            else []
+        )
+
+        skipped_ids = sorted(set(all_ids) - set(selected_ids))
+        skipped_dict[fam] = skipped_ids
+
+        rep_cluster_id = selected_ids[0] if selected_ids else None
+
+        rep_angle = np.nan
+        if rep_cluster_id is not None and "angle_deg" in fam_selected.columns:
+            vals = fam_selected.loc[
+                fam_selected["cluster_id"] == rep_cluster_id,
+                "angle_deg"
+            ].dropna()
+            rep_angle = vals.iloc[0] if len(vals) else np.nan
+
+        summary_rows.append({
+            "gt_family": fam,
+            "track_id": track_val,
+            "total_clusters": int(len(fam_clusters)),
+            "selected_clusters": int(len(fam_selected)),
+            "skipped_clusters": int(len(skipped_ids)),
+            "too_far": 0,
+            "cluster_id": rep_cluster_id,
+            "angle_deg": rep_angle
+        })
+
     summary_df = pd.DataFrame(summary_rows)
-    return selected_clusters, skipped_dict, summary_df
+
+    return sc.reset_index(drop=True), skipped_dict, summary_df
 
 
-__all__ = [
-    "make_clusters",
-    "compute_cluster_angles",
-    "select_clusters_per_family",
-    "angle_between",
-    "extract_shoreline_tangent",
-    "polygon_principal_axis",
-]
+def add_cluster_width_m(selected_clusters, dataset_raw, xm, utm_epsg):
+    """
+    Add cluster_width_m: distance in meters between the outermost member
+    beams, evaluated at the common offshore distance xm.
+    """
+    if selected_clusters is None or selected_clusters.empty:
+        return selected_clusters
+
+    sc = selected_clusters.copy()
+
+    df = dataset_raw.copy()
+    df["gt_family"] = df["gt_family"].astype(str)
+    df["beam_id"] = df["beam_id"].astype(str).str.strip()
+
+    target_crs = f"EPSG:{utm_epsg}"
+    df = gpd.GeoDataFrame(df, geometry="geometry", crs=dataset_raw.crs)
+
+    if df.crs is None:
+        df = df.set_crs(target_crs, allow_override=True)
+    elif str(df.crs) != target_crs:
+        df = df.to_crs(target_crs)
+
+    widths = []
+
+    for _, cl in sc.iterrows():
+        fam = str(cl["gt_family"])
+        beam_ids = cluster_member_beams(cl)
+
+        pts = []
+
+        for bid in beam_ids:
+            bdf = df[
+                (df["gt_family"] == fam) &
+                (df["beam_id"] == bid)
+            ].copy()
+
+            if bdf.empty:
+                continue
+
+            pt = beam_position_at_xm(bdf, xm=xm)
+
+            if pt is not None:
+                pts.append(pt)
+
+        if len(pts) < 2:
+            widths.append(0.0 if len(pts) == 1 else np.nan)
+            continue
+
+        coords = np.array([[p.x, p.y] for p in pts], dtype=float)
+
+        if len(coords) == 2:
+            width_m = float(np.linalg.norm(coords[1] - coords[0]))
+        else:
+            centered = coords - coords.mean(axis=0)
+            _, _, vh = np.linalg.svd(centered, full_matrices=False)
+            axis = vh[0]
+            lateral_pos = centered @ axis
+            width_m = float(lateral_pos.max() - lateral_pos.min())
+
+        widths.append(width_m)
+
+    sc["cluster_width_m"] = widths
+
+    return sc

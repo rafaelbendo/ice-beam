@@ -1,0 +1,16 @@
+# ICE-BEAM run configuration: North Slope of Alaska, SlideRule 5 m.
+# Relative paths are resolved against this file's folder.
+
+[paths]
+aoi_path            = "/Users/rafael/code/arctic/shp/coastline_NSAK_3Buffer.shp"
+shoreline_path      = "/Users/rafael/code/arctic/shp/coastline_NSAK_3.shp"
+is2_tracks_path     = "/Users/rafael/code/arctic/shp/IS2_tracks.shp"
+sliderule_cache_dir = "/Users/rafael/code/arctic/data"
+outdir              = "../outputs"
+
+# Any Params field can be overridden here; omitted fields keep the
+# defaults in src/is2retreat/config.py (= final notebook, version 21).
+[params]
+# SIZE_LIMIT_M = 180.0
+# BIAS_TOLERANCES = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+# SLIDERULE_SEGMENT_RESOLUTION_M = 5.0
