@@ -1,0 +1,21 @@
+# conda env create -f environment.yml && conda activate icebeam && pip install -e .
+name: icebeam
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pandas
+  - geopandas>=1.0
+  - shapely>=2.0
+  - pyogrio
+  - scipy
+  - scikit-learn
+  - filelock
+  - sliderule
+  # notebooks / figures
+  - jupyterlab
+  - ipykernel
+  - matplotlib
+  - papermill

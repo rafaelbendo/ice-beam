@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "is2retreat"
+version = "0.2.0"
+description = "ICE-BEAM: Arctic coastal bluff retreat from ICESat-2 (SlideRule ATL06) profiles"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "geopandas>=1.0",
+    "shapely>=2.0",
+    "pyogrio",
+    "scipy",
+    "scikit-learn",
+    "filelock",
+    "sliderule",
+]
+
+[project.optional-dependencies]
+notebooks = ["jupyterlab", "ipykernel", "matplotlib", "papermill"]
+
+[project.scripts]
+is2retreat = "is2retreat.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

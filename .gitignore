@@ -19,3 +19,12 @@ notebooks/.ipynb_checkpoints/
 
 # Logs
 *.log
+
+# Pipeline outputs and run logs
+outputs/
+run_all_tracks_*.log
+
+# Packaging
+*.egg-info/
+build/
+dist/
