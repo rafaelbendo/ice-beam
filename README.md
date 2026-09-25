@@ -2,7 +2,7 @@
 A Python framework to quantify coastal bluff change using ICESat-2 (ATL06) elevation profiles, beam clustering, bias filtering, and DSAS-style shoreline metrics.
 
 <p align="center">
-	<img src="pictures/copyA106AK_IMG_9549.jpg" alt="Aerial view of an eroding permafrost bluff on the Arctic coast of Alaska" width="700">
+	<img src="pictures/A106AK_IMG_9549.jpg" alt="Aerial view of an eroding permafrost bluff on the Arctic coast of Alaska" width="700">
 </p>
 
 # Purpose
