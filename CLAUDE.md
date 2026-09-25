@@ -35,6 +35,8 @@ scripts/run_all_tracks.sh   batch run over configs/tracks_filtered.txt
 notebooks/              00_sliderule_data, 01_load_and_preprocess, 02_clusters,
                         03_bluff_and_gie, 04_run_tracks (committed with outputs)
 pictures/               README images
+dashboard/              Streamlit app: app.py (Overview) + pages/1-3, data_loader.py;
+                        data in dashboard/data/ (parquet exports + pipeline_stages/ CSVs)
 outputs/                run results (gitignored)
 src/is2retreat/
   config.py             Params (all parameters + defaults) and Paths; load_config()
@@ -73,6 +75,9 @@ is2retreat ... --source cache|sliderule|auto --outdir DIR --set SIZE_LIMIT_M=90
 folder. SlideRule pulls are cached there as `<track>/ATL06_5m.gpkg`, and `--source auto`
 (default) reuses the cache when it exists. A track that can't be processed raises `TrackSkipped`
 and the batch moves on. Track ids are 4-digit zero-padded RGT numbers.
+
+Dashboard: `streamlit run dashboard/app.py`. The optional historical-DSAS layer on the Erosion
+Results page reads `dashboard/data/historical_dsas/` (gitignored, not distributed).
 
 Python API: `paths, params = load_config(...)`, `run_track(track_id, paths, params,
 write_outputs=False)` returns a `TrackResult` (DSAS tables, GIE result, `inputs`).

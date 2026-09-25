@@ -28,3 +28,6 @@ run_all_tracks_*.log
 *.egg-info/
 build/
 dist/
+
+# Optional dashboard data not distributed with the repository
+dashboard/data/historical_dsas/

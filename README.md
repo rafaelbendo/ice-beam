@@ -208,6 +208,17 @@ The measured table also repeats the cluster's angles, center, dates and metrics 
 | `Acq_date`, `beam_id` | The beam |
 | `beam_angle` | Angle between the beam and the local shoreline (0–90°) |
 
+# Dashboard
+
+An interactive [Streamlit](https://streamlit.io) dashboard summarizes the data and results in four pages: **Overview** (data availability and maps), **Data Characterization** (beams by region, season, coastal type, crossing angle), **QC / Filtering** (the preprocessing filters), and **Erosion Results** (clusters and EPR by pipeline stage).
+
+```bash
+conda activate icebeam
+streamlit run dashboard/app.py
+```
+
+It opens in the browser at http://localhost:8501. Its data is in `dashboard/data/` (see the README there). The optional historical-DSAS map layer needs a shapefile that is not included in the repository.
+
 # Package layout
 
 | Module | Step |

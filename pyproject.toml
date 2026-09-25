@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 notebooks = ["jupyterlab", "ipykernel", "matplotlib", "papermill"]
+dashboard = ["streamlit", "streamlit-folium", "folium", "plotly", "pyarrow"]
 
 [project.scripts]
 is2retreat = "is2retreat.cli:main"

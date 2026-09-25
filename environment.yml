@@ -14,6 +14,12 @@ dependencies:
   - scikit-learn
   - filelock
   - sliderule
+  # dashboard
+  - streamlit
+  - streamlit-folium
+  - folium
+  - plotly
+  - pyarrow
   # notebooks / figures
   - jupyterlab
   - ipykernel
