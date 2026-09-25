@@ -69,6 +69,10 @@ ICESat-2 elevations are requested from SlideRule per track and cached locally; s
 
 # Workflow
 
+<p align="center">
+	<img src="pictures/ICE-BEAM_flowchart.png" alt="ICE-BEAM flowchart: initialization, preprocessing, processing (clustering and GIE correction) and assessment" width="800">
+</p>
+
 For each ICESat-2 track (RGT):
 
 1.	Load ATL06-like segments from SlideRule (cached per track as GeoPackage)
