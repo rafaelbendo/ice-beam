@@ -22,34 +22,36 @@ st.caption(f"Source: `qc_stats_cell24.parquet` — last modified **{mtime:%Y-%m-
 HAS_INSUFFICIENT_INTERSECTION = "insufficient_intersection" in qc_stats_all.columns
 
 # ------------------------------------------------------------------
-# Step 0: filter to Bluff-dominant files -- this is the QC population for
-# every section below, not just the funnel at the bottom.
+# Step 0: filter to files that cross Bluff -- this is the QC population for
+# every section below, not just the funnels at the bottom.
 # ------------------------------------------------------------------
 st.header("Bluff filter")
 st.caption(
-    "First step: keep only files whose dominant coastal type is Bluff "
-    "(coasttype_stats.parquet, dominant_type == 'Bluff'). Every section below uses this "
-    "filtered population as its starting point, not the full file set."
+    "First step: keep only files (one beam on one date) that cross Bluff coast, i.e. have any "
+    "points on a Bluff segment (coasttype_stats.parquet, crosses_Bluff), even if another coastal "
+    "type has more points. Every section below uses this filtered population as its starting "
+    "point, not the full file set."
 )
 
 coasttype_stats = load_coasttype_stats()
 qc_stats = qc_stats_all.merge(
-    coasttype_stats[["track_id", "gt", "date", "dominant_type"]], on=["track_id", "gt", "date"], how="left",
+    coasttype_stats[["track_id", "gt", "date", "crosses_Bluff", "dominant_type"]],
+    on=["track_id", "gt", "date"], how="left",
 )
 n_all_files = len(qc_stats_all)
-qc_stats = qc_stats[qc_stats["dominant_type"] == "Bluff"]
+qc_stats = qc_stats[qc_stats["crosses_Bluff"].eq(True)]
 n_bluff_files = len(qc_stats)
 n_not_bluff = n_all_files - n_bluff_files
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Total files", f"{n_all_files:,}")
-col2.metric("Bluff", f"{n_bluff_files:,}", f"{n_bluff_files / n_all_files * 100:.1f}%")
-col3.metric("Not Bluff", f"{n_not_bluff:,}", f"{n_not_bluff / n_all_files * 100:.1f}%", delta_color="inverse")
+col2.metric("Cross Bluff", f"{n_bluff_files:,}", f"{n_bluff_files / n_all_files * 100:.1f}%")
+col3.metric("Don't cross Bluff", f"{n_not_bluff:,}", f"{n_not_bluff / n_all_files * 100:.1f}%", delta_color="inverse")
 
 fig_bluff = px.bar(
-    x=["Bluff", "Not Bluff"], y=[n_bluff_files, n_not_bluff],
-    labels={"x": "Dominant coastal type", "y": "Files"},
-    title="Files crossing Bluff vs. other coastal types",
+    x=["Cross Bluff", "Don't cross Bluff"], y=[n_bluff_files, n_not_bluff],
+    labels={"x": "File", "y": "Files"},
+    title="Files crossing Bluff vs. not",
 )
 st.plotly_chart(fig_bluff, width="stretch")
 
@@ -216,7 +218,7 @@ tracks_hit_by_family_all = (
 n_possible_total = int(tracks_hit_by_family_all.sum() * 2 * n_possible_cycles())
 
 funnel_stages = [
-    "What I should have", "All files", "Bluff files", "After elevation filter", "After density filter (remaining)",
+    "What I should have", "All files", "Bluff files (cross Bluff)", "After elevation filter", "After density filter (remaining)",
 ]
 funnel_counts = [n_possible_total, n_all_files, n_bluff_files, n_after_elev, len(after_density)]
 
@@ -232,3 +234,64 @@ with col_b:
     ))
     fig_funnel.update_layout(title="QC filter funnel")
     st.plotly_chart(fig_funnel, width="stretch")
+
+# ------------------------------------------------------------------
+# Bluff filter funnel -- Bluff-only from the start
+# ------------------------------------------------------------------
+st.header("Bluff filter funnel")
+st.caption(
+    "Bluff-only from the start. **What I should have** = beams that pass a Bluff feature "
+    "(each (track, beam) pair, gt1l … gt3r, that crosses Bluff in at least one file) × "
+    f"{n_possible_cycles()} possible repeat cycles (2019-01-01 to 2025-12-31). **Files on Bluff** = "
+    "the actual files that cross Bluff (same population as the Bluff filter above); the "
+    "elevation and density filters then run on those files."
+)
+
+bluff_beams = (
+    coasttype_stats.loc[coasttype_stats["crosses_Bluff"].eq(True), ["track_id", "gt"]]
+    .drop_duplicates()
+    .assign(gt_family=lambda d: d["gt"].str[:3])
+)
+n_bluff_should_have = len(bluff_beams) * n_possible_cycles()
+
+bluff_funnel_stages = [
+    "What I should have",
+    "Files on Bluff",
+    "After elevation filter",
+    "After density filter (remaining)",
+]
+bluff_funnel_counts = [n_bluff_should_have, n_bluff_files, n_after_elev, len(after_density)]
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Beams crossing Bluff", f"{len(bluff_beams):,}")
+col2.metric("Tracks with a Bluff-crossing beam", f"{bluff_beams['track_id'].nunique():,}")
+col3.metric(
+    "Remaining vs. should have", f"{len(after_density):,} / {n_bluff_should_have:,}",
+    f"{len(after_density) / n_bluff_should_have * 100:.0f}%" if n_bluff_should_have else None,
+    delta_color="off",
+)
+
+col_a, col_b = st.columns([1, 2])
+with col_a:
+    st.dataframe(
+        {"Stage": bluff_funnel_stages, "Files remaining": bluff_funnel_counts},
+        hide_index=True, width="stretch",
+    )
+with col_b:
+    fig_bluff_funnel = go.Figure(go.Funnel(
+        y=bluff_funnel_stages, x=bluff_funnel_counts, textinfo="value+percent initial",
+    ))
+    fig_bluff_funnel.update_layout(title="Bluff filter funnel")
+    st.plotly_chart(fig_bluff_funnel, width="stretch")
+
+by_family = (
+    bluff_beams.groupby("gt_family").size().mul(n_possible_cycles()).rename("What I should have").to_frame()
+    .join(qc_stats.groupby("gt_family").size().rename("Files on Bluff"))
+    .join(qc_after_elev.groupby("gt_family").size().rename("After elevation filter"))
+    .join(after_density.groupby("gt_family").size().rename("After density filter"))
+    .fillna(0)
+    .astype(int)
+)
+by_family["Remaining %"] = (by_family["After density filter"] / by_family["What I should have"] * 100).round(1)
+with st.expander("Bluff filter funnel by GT family"):
+    st.dataframe(by_family.reset_index().rename(columns={"gt_family": "GT family"}), hide_index=True, width="stretch")
