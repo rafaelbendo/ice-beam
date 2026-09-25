@@ -1,6 +1,8 @@
 # ICE-BEAM (ICESat-2 Bluff Erosion Assessment Method)
 A Python framework to quantify coastal bluff change using ICESat-2 (ATL06) elevation profiles, beam clustering, bias filtering, and DSAS-style shoreline metrics.
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://ice-beam.streamlit.app/) **Interactive dashboard:** https://ice-beam.streamlit.app/
+
 <p align="center">
 	<img src="pictures/A106AK_IMG_9549.jpg" alt="Aerial view of an eroding permafrost bluff on the Arctic coast of Alaska" width="700">
 </p>
@@ -214,7 +216,7 @@ The measured table also repeats the cluster's angles, center, dates and metrics 
 
 # Dashboard
 
-An interactive [Streamlit](https://streamlit.io) dashboard summarizes the data and results in four pages: **Overview** (data availability and maps), **Data Characterization** (beams by region, season, coastal type, crossing angle), **QC / Filtering** (the preprocessing filters), and **Erosion Results** (clusters and EPR by pipeline stage).
+An interactive [Streamlit](https://streamlit.io) dashboard, online at **https://ice-beam.streamlit.app/**, summarizes the data and results in four pages: **Overview** (data availability and maps), **Data Characterization** (beams by region, season, coastal type, crossing angle), **QC / Filtering** (the preprocessing filters), and **Erosion Results** (clusters and EPR by pipeline stage).
 
 ```bash
 conda activate icebeam
