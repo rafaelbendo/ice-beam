@@ -126,8 +126,8 @@ def _gie_cluster_source(files: OutputFiles, dsas_summary_all, write_outputs):
     """DSAS summary rows the GIE step reads its bias tolerances from."""
     sources = []
     if write_outputs:
-        existing = read_csv_locked(files.dsas_summary)
-        if not existing.empty or files.dsas_summary.exists():
+        existing = read_csv_locked(files.cluster_metrics_measured)
+        if not existing.empty or files.cluster_metrics_measured.exists():
             sources.append(existing)
     if dsas_summary_all is not None and not dsas_summary_all.empty:
         sources.append(dsas_summary_all.copy())
@@ -209,9 +209,9 @@ def run_track(track_id, paths: Paths, params: Params = Params(),
     dsas_summary_all = dsas_summary
 
     if write_outputs:
-        dsas_summary_all = save_dsas_table(files.dsas_summary, dsas_summary, KEY_DSAS_SUMMARY)
-        save_dsas_table(files.dsas_interval, dsas_interval, KEY_DSAS_INTERVAL)
-        save_dsas_table(files.dsas_beam_angle, dsas_beam_angle, KEY_DSAS_BEAM_ANGLE)
+        dsas_summary_all = save_dsas_table(files.cluster_metrics_measured, dsas_summary, KEY_DSAS_SUMMARY)
+        save_dsas_table(files.interval_changes_measured, dsas_interval, KEY_DSAS_INTERVAL)
+        save_dsas_table(files.beam_angles, dsas_beam_angle, KEY_DSAS_BEAM_ANGLE)
         if verbose:
             print(f"DSAS tables updated -> {paths.outdir}")
 
@@ -219,9 +219,9 @@ def run_track(track_id, paths: Paths, params: Params = Params(),
     gie_result, gie_skip = run_gie_for_track(inputs, params, cluster_source)
 
     if gie_skip is None and write_outputs:
-        save_gie_table(files.gie_summary, gie_result.summary_df, KEY_GIE_SUMMARY)
-        save_gie_table(files.gie_interval, gie_result.interval_df, KEY_GIE_INTERVAL)
-        save_gie_table(files.gie_beams, gie_result.beam_df, KEY_GIE_BEAMS)
+        save_gie_table(files.cluster_metrics_gie, gie_result.summary_df, KEY_GIE_SUMMARY)
+        save_gie_table(files.interval_changes_gie, gie_result.interval_df, KEY_GIE_INTERVAL)
+        save_gie_table(files.bluff_positions_gie, gie_result.beam_df, KEY_GIE_BEAMS)
         if verbose:
             print(f"GIE tables updated -> {paths.outdir}")
     elif gie_skip is not None and verbose:

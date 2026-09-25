@@ -32,23 +32,25 @@ KEY_GIE_BEAMS = ["track_id", "bias_tolerance", "gt_family", "cluster_id", "beam_
 
 @dataclass(frozen=True)
 class OutputFiles:
-    dsas_summary: Path
-    dsas_interval: Path
-    dsas_beam_angle: Path
-    gie_summary: Path
-    gie_interval: Path
-    gie_beams: Path
+    """The six shared output tables (see README, "Output tables")."""
+
+    cluster_metrics_measured: Path   # one row per cluster: DSAS metrics of bluff_x
+    interval_changes_measured: Path  # one row per consecutive date pair of a cluster
+    beam_angles: Path                # one row per beam: beam/shoreline crossing angle
+    cluster_metrics_gie: Path        # one row per cluster: measured and GIE-corrected metrics
+    interval_changes_gie: Path       # one row per date pair: measured and corrected change
+    bluff_positions_gie: Path        # one row per bluff position (beam, date) with GIE terms
 
     @classmethod
     def in_dir(cls, outdir, res_tag: str) -> "OutputFiles":
         outdir = Path(outdir)
         return cls(
-            dsas_summary=outdir / f"DSAS_{res_tag}.csv",
-            dsas_interval=outdir / f"DSAS_Intervals_{res_tag}.csv",
-            dsas_beam_angle=outdir / f"DSAS_BeamAngles_{res_tag}.csv",
-            gie_summary=outdir / f"DSAS_GIE_AllBiasTol_{res_tag}.csv",
-            gie_interval=outdir / f"DSAS_GIE_AllBiasTol_Intervals_{res_tag}.csv",
-            gie_beams=outdir / f"DSAS_GIE_AllBiasTol_BeamDetails_{res_tag}.csv",
+            cluster_metrics_measured=outdir / f"cluster_metrics_measured_{res_tag}.csv",
+            interval_changes_measured=outdir / f"interval_changes_measured_{res_tag}.csv",
+            beam_angles=outdir / f"beam_angles_{res_tag}.csv",
+            cluster_metrics_gie=outdir / f"cluster_metrics_gie_{res_tag}.csv",
+            interval_changes_gie=outdir / f"interval_changes_gie_{res_tag}.csv",
+            bluff_positions_gie=outdir / f"bluff_positions_gie_{res_tag}.csv",
         )
 
 
@@ -98,7 +100,7 @@ def _parse_date_keys(df, keys):
     """
     Dates read back from CSV are text while new rows hold Timestamps; parse
     date key columns so drop_duplicates can match them. (The notebook skipped
-    this, so re-running a track duplicated its DSAS_BeamAngles rows.)
+    this, so re-running a track duplicated its beam-angle rows.)
     """
     df = df.copy()
     for col in keys:
