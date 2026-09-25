@@ -223,6 +223,8 @@ streamlit run dashboard/app.py
 
 It opens in the browser at http://localhost:8501. Its data is in `dashboard/data/` (see the README there). The optional historical-DSAS map layer needs a shapefile that is not included in the repository.
 
+To share it online, deploy it on [Streamlit Community Cloud](https://share.streamlit.io) (free): sign in with GitHub, choose **Create app**, and set repository `rafaelbendo/ice-beam`, branch `master`, main file `dashboard/app.py`. Packages are installed from `dashboard/requirements.txt`. The deployed app updates on every push.
+
 # Package layout
 
 | Module | Step |
