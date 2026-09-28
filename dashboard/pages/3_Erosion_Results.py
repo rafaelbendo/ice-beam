@@ -1,9 +1,8 @@
 """ICE-BEAM Dashboard -- Page 3: Erosion Results.
 
-Map only for now -- the four pipeline-stage stat sections (direct / preprocessed /
-preproc+GIE / cluster+ICE-BEAM) come in a later pass. This page reads the four
-DSAS outcome-table CSVs in dashboard/data/pipeline_stages/, plus
-gt_family_crossings.parquet for point positions.
+Clusters of every pipeline stage (direct / preprocessed / preproc+GIE /
+cluster-only / ICE-BEAM) on one map, plus a per-stage cluster listing. Reads the
+four DSAS outcome-table CSVs in dashboard/data/pipeline_stages/.
 """
 
 import folium
@@ -14,25 +13,14 @@ import streamlit as st
 from folium.plugins import FastMarkerCluster
 from streamlit_folium import st_folium
 
-from data_loader import DATA_DIR, HISTORICAL_DSAS_SHP, PIPELINE_STAGES_DIR, load_shoreline_utm
+from data_loader import HISTORICAL_DSAS_SHP, PIPELINE_STAGES_DIR, load_shoreline_utm
 
 st.set_page_config(page_title="ICE-BEAM — Erosion Results", layout="wide")
 
 st.title("Erosion Results")
 
-GT_FAMILY_CROSSINGS_FP = DATA_DIR / "gt_family_crossings.parquet"
-
 GEOMORPHIC_FEATURE_NAMES = {1: "Bluff", 2: "Delta", 3: "Rock cliff", 4: "Beach", 5: "Anthropogenic"}
 GEOMORPHIC_FEATURE_COLORS = {1: "#a50026", 2: "#1a9850", 3: "#762a83", 4: "#f1a340", 5: "#4575b4"}
-
-CATEGORY_ORDER = ["usable", "nan_at_stage", "missing_upstream", "not_in_icebeam"]
-CATEGORY_COLORS = {
-    "usable": "#2ECC71",
-    "nan_at_stage": "#f1a340",
-    "missing_upstream": "#4575b4",
-    "not_in_icebeam": "#a50026",
-}
-KEYS = ["track_id", "gt_family"]
 
 # Individual-cluster CSVs (not aggregated to one point per track/gt_family) --
 # each already carries its own center_lat/center_lon, no join needed.
@@ -114,62 +102,6 @@ def _line_to_folium_locations(geom):
     return None
 
 
-# ------------------------------------------------------------------
-# Load + aggregate the four pipeline-stage CSVs (exact code/logic as given)
-# ------------------------------------------------------------------
-@st.cache_data
-def load_pipeline_stage_aggregates():
-    df0 = _read_csv(STAGE_CSVS["Direct"][0])
-    df1 = _read_csv(STAGE_CSVS["Preprocessing"][0])
-    df2 = _read_csv(STAGE_CSVS["Preproc+GIE"][0])
-    df4 = _read_csv(STEP4_CSV)
-
-    def aggregate_stage(df, stage_name):
-        grouped = df.groupby(['track_id', 'gt_family'])
-        out = grouped.agg(**{
-            f'EPR_{stage_name}_median': ('EPR', 'median'),
-            f'U_{stage_name}_median': ('U_EPR_myr', 'median'),
-            f'n_{stage_name}': ('EPR', 'count'),
-        }).reset_index()
-        return out
-
-    agg_direct = aggregate_stage(df0, 'direct')
-    agg_preprocessed = aggregate_stage(df1, 'preprocessed')
-    agg_preproc_gie = aggregate_stage(df2, 'preproc_gie')
-
-    def aggregate_df4(df):
-        grouped = df.groupby(['track_id', 'gt_family'])
-        out = grouped.agg(
-            EPR_cluster_only_median=('EPR_measured', 'median'),
-            U_cluster_only_median=('U_EPR_measured_myr', 'median'),
-            EPR_icebeam_median=('EPR_flagged', 'median'),
-            U_icebeam_median=('U_EPR_corrected_myr', 'median'),
-            n_icebeam=('EPR_flagged', 'count'),
-            angle_used_median_deg_agg=('angle_used_median_deg', 'median'),
-            coast_slope_sign_agg=('coast_slope_sign', 'median'),
-            max_abs_gie_agg=('max_abs_gie', 'median'),
-        ).reset_index()
-        pct_flagged_df = df.groupby(['track_id', 'gt_family'])['flag_status'] \
-            .apply(lambda s: (s == 'flagged').mean()).reset_index(name='pct_flagged')
-        out = out.merge(pct_flagged_df, on=['track_id', 'gt_family'], how='left')
-        return out
-
-    agg_cluster_icebeam = aggregate_df4(df4)
-
-    return agg_direct, agg_preprocessed, agg_preproc_gie, agg_cluster_icebeam
-
-
-agg_direct, agg_preprocessed, agg_preproc_gie, agg_cluster_icebeam = load_pipeline_stage_aggregates()
-
-
-@st.cache_data
-def load_gt_family_crossings() -> gpd.GeoDataFrame:
-    return gpd.read_parquet(GT_FAMILY_CROSSINGS_FP)
-
-
-gt_family_crossings = load_gt_family_crossings()
-
-
 @st.cache_data
 def load_historical_dsas_points() -> list:
     """[lat, lon, tooltip] rows for every historical DSAS transect-intersection
@@ -213,7 +145,7 @@ def load_cluster_layers() -> dict:
 # Preproc+GIE share one set of column names; cluster-only and ICE-BEAM (both
 # from DSAS_metrics_flaggedStep4.csv) use the "measured" vs. "flagged"/
 # "corrected" variants -- same measured/flagged-vs-corrected pairing already
-# used for the cluster map and for agg_cluster_icebeam above.
+# used for the cluster map above.
 STAGE_LISTING_COLUMNS = {
     "Direct": {"NSM": "NSM", "EPR": "EPR", "U_EPR": "U_EPR_myr", "LRR": "LRR"},
     "Preprocessing": {"NSM": "NSM", "EPR": "EPR", "U_EPR": "U_EPR_myr", "LRR": "LRR"},
@@ -411,7 +343,7 @@ st.header("Cluster listings")
 st.caption(
     "All clusters for each stage, with that stage's own NSM/EPR/U_EPR/LRR. cluster-only uses the "
     "*_measured columns, ICE-BEAM uses EPR_flagged/NSM_flagged/LRR_flagged with U_EPR_corrected_myr "
-    "(same measured-vs-flagged/corrected pairing as the map and metrics above). used_cycles_cluster "
+    "(same measured-vs-flagged/corrected pairing as the map above). used_cycles_cluster "
     "and elev_avg only exist in DSAS_metrics_flaggedStep4.csv -- Direct/Preprocessing/Preproc+GIE show "
     "them as empty."
 )
@@ -430,226 +362,3 @@ for tab, stage in zip(listing_tabs, STAGE_ORDER):
             selection_mode="single-row",
             key=table_key,
         )
-
-# ------------------------------------------------------------------
-# Key normalization -- track_id/gt_family dtypes are NOT assumed to already
-# match between the DSAS tables (int64 track_id) and gt_family_crossings.parquet
-# (zero-padded string track_id).
-# ------------------------------------------------------------------
-st.header("Key normalization check")
-
-col_dsas, col_crossings = st.columns(2)
-with col_dsas:
-    st.markdown("**agg_direct** (representative of the DSAS pipeline tables)")
-    st.code(
-        f"track_id  dtype={agg_direct['track_id'].dtype}  sample={agg_direct['track_id'].head(5).tolist()}\n"
-        f"gt_family dtype={agg_direct['gt_family'].dtype}  sample={agg_direct['gt_family'].head(5).tolist()}"
-    )
-with col_crossings:
-    st.markdown("**gt_family_crossings.parquet**")
-    st.code(
-        f"track_id  dtype={gt_family_crossings['track_id'].dtype}  "
-        f"sample={gt_family_crossings['track_id'].head(5).tolist()}\n"
-        f"gt_family dtype={gt_family_crossings['gt_family'].dtype}  "
-        f"sample={gt_family_crossings['gt_family'].head(5).tolist()}"
-    )
-
-
-def normalize_keys(df: pd.DataFrame) -> pd.DataFrame:
-    """track_id -> 4-digit zero-padded string, gt_family -> lowercase string."""
-    df = df.copy()
-    df["track_id"] = pd.to_numeric(df["track_id"]).astype(int).astype(str).str.zfill(4)
-    df["gt_family"] = df["gt_family"].astype(str).str.lower()
-    return df
-
-
-agg_direct_n = normalize_keys(agg_direct)
-agg_preprocessed_n = normalize_keys(agg_preprocessed)
-agg_preproc_gie_n = normalize_keys(agg_preproc_gie)
-agg_cluster_icebeam_n = normalize_keys(agg_cluster_icebeam)
-gt_family_crossings_n = normalize_keys(gt_family_crossings)
-
-direct_keys = set(zip(agg_direct_n["track_id"], agg_direct_n["gt_family"]))
-crossings_keys = set(zip(gt_family_crossings_n["track_id"], gt_family_crossings_n["gt_family"]))
-unmatched_direct = direct_keys - crossings_keys
-unmatched_crossings = crossings_keys - direct_keys
-
-col_a, col_b = st.columns(2)
-col_a.metric(
-    "agg_direct rows with no match in crossings",
-    f"{len(unmatched_direct)} / {len(direct_keys)}",
-)
-col_b.metric(
-    "gt_family_crossings rows with no match in agg_direct",
-    f"{len(unmatched_crossings)} / {len(crossings_keys)}",
-)
-st.caption(
-    "Checked after normalization (track_id -> 4-digit zero-padded string, gt_family -> lowercase). "
-    "gt_family_crossings.parquet legitimately covers more (track_id, gt_family) pairs than any single "
-    "DSAS stage -- it's built from the full IS2_tracks.shp x coastline intersection, not filtered to "
-    "units that made it into a given pipeline stage."
-)
-
-# ------------------------------------------------------------------
-# Completeness classification per (track_id, gt_family) unit
-# ------------------------------------------------------------------
-st.header("Completeness classification")
-
-
-def _presence(df: pd.DataFrame, flag_name: str) -> pd.DataFrame:
-    out = df[KEYS].drop_duplicates().copy()
-    out[flag_name] = True
-    return out
-
-
-presence = (
-    _presence(agg_direct_n, "present_direct")
-    .merge(_presence(agg_preprocessed_n, "present_preprocessed"), on=KEYS, how="outer")
-    .merge(_presence(agg_preproc_gie_n, "present_preproc_gie"), on=KEYS, how="outer")
-    .merge(_presence(agg_cluster_icebeam_n, "present_icebeam"), on=KEYS, how="outer")
-)
-for flag in ["present_direct", "present_preprocessed", "present_preproc_gie", "present_icebeam"]:
-    presence[flag] = presence[flag].fillna(False)
-
-classified = (
-    presence
-    .merge(agg_direct_n[KEYS + ["EPR_direct_median"]], on=KEYS, how="left")
-    .merge(agg_preprocessed_n[KEYS + ["EPR_preprocessed_median"]], on=KEYS, how="left")
-    .merge(agg_preproc_gie_n[KEYS + ["EPR_preproc_gie_median"]], on=KEYS, how="left")
-    .merge(agg_cluster_icebeam_n[KEYS + ["EPR_icebeam_median"]], on=KEYS, how="left")
-)
-
-PRE_ICEBEAM_EPR_COLS = ["EPR_direct_median", "EPR_preprocessed_median", "EPR_preproc_gie_median"]
-
-present_all_four = (
-    classified["present_direct"] & classified["present_preprocessed"]
-    & classified["present_preproc_gie"] & classified["present_icebeam"]
-)
-null_pre_icebeam = classified[PRE_ICEBEAM_EPR_COLS].isna().any(axis=1)
-null_icebeam = classified["EPR_icebeam_median"].isna()
-
-usable = present_all_four & ~null_pre_icebeam & ~null_icebeam
-# nan_at_stage per spec is "null in a pre-ICE-BEAM stage"; a unit present in all
-# four stages but null ONLY in the ICE-BEAM-stage EPR (no pre-stage null) is rare
-# in practice -- folded into nan_at_stage too rather than left unclassified.
-nan_at_stage = present_all_four & ~usable
-
-missing_upstream = classified["present_icebeam"] & ~(
-    classified["present_direct"] & classified["present_preprocessed"] & classified["present_preproc_gie"]
-)
-not_in_icebeam = (
-    (classified["present_direct"] | classified["present_preprocessed"] | classified["present_preproc_gie"])
-    & ~classified["present_icebeam"]
-)
-
-classified["category"] = np.select(
-    [usable, nan_at_stage, missing_upstream, not_in_icebeam],
-    ["usable", "nan_at_stage", "missing_upstream", "not_in_icebeam"],
-    default="unclassified",
-)
-
-n_icebeam_only_null = int((present_all_four & ~null_pre_icebeam & null_icebeam).sum())
-if n_icebeam_only_null:
-    st.caption(
-        f"Note: {n_icebeam_only_null} unit(s) present in all four stages with non-null pre-ICE-BEAM EPR "
-        "but a null ICE-BEAM-stage EPR -- counted under nan_at_stage above (not a separate category)."
-    )
-
-category_counts = classified["category"].value_counts().reindex(CATEGORY_ORDER + ["unclassified"]).fillna(0).astype(int)
-
-# "Total ICE-BEAM ground-truth units" = units ICE-BEAM actually produced output
-# for (present_icebeam == True) -- usable + nan_at_stage + missing_upstream.
-# NOT the same as len(classified), which also includes not_in_icebeam units
-# that never reached ICE-BEAM at all (present in some upstream stage only).
-n_all_units = len(classified)
-n_icebeam_units = int(category_counts[["usable", "nan_at_stage", "missing_upstream"]].sum())
-
-REFERENCE = {"total": 104, "usable": 98, "missing_upstream": 5, "nan_at_stage": 1}
-comparison = pd.DataFrame({
-    "category": ["total (ICE-BEAM units)"] + CATEGORY_ORDER,
-    "observed": [n_icebeam_units] + [int(category_counts.get(c, 0)) for c in CATEGORY_ORDER],
-    "expected (~)": [REFERENCE.get(k, None) for k in ["total"] + CATEGORY_ORDER],
-})
-st.dataframe(comparison, hide_index=True, width="stretch")
-st.caption(
-    f"not_in_icebeam: {int(category_counts.get('not_in_icebeam', 0))} unit(s) present in an upstream "
-    f"stage but never reached ICE-BEAM -- outside the ~104 ICE-BEAM ground-truth scope above. "
-    f"Across all four stages combined, {n_all_units} distinct (track_id, gt_family) pairs appear in total."
-)
-if category_counts.get("unclassified", 0):
-    st.warning(f"{category_counts['unclassified']} unit(s) did not fall into any of the four categories.")
-
-# ------------------------------------------------------------------
-# Join to gt_family_crossings for plotting
-# ------------------------------------------------------------------
-mapped = classified.merge(
-    gt_family_crossings_n[KEYS + ["geometry", "cross_pt_method"]], on=KEYS, how="left",
-)
-mapped = gpd.GeoDataFrame(mapped, geometry="geometry", crs=gt_family_crossings_n.crs)
-
-n_no_geometry = mapped["geometry"].isna().sum()
-if n_no_geometry:
-    st.caption(f"{n_no_geometry} classified unit(s) have no resolved crossing point and are not shown on the map.")
-
-plottable = mapped[mapped["geometry"].notna()].copy()
-plottable_4326 = plottable.to_crs("EPSG:4326")
-
-# ------------------------------------------------------------------
-# Metrics row (live-computed)
-# ------------------------------------------------------------------
-n_usable = int(category_counts.get("usable", 0))
-usable_pct = (n_usable / n_icebeam_units * 100) if n_icebeam_units else 0.0
-
-col1, col2, col3 = st.columns(3)
-col1.metric("ICE-BEAM ground-truth units", f"{n_icebeam_units:,}")
-col2.metric("Usable", f"{n_usable:,}")
-col3.metric("Usable %", f"{usable_pct:.1f}%")
-
-# ------------------------------------------------------------------
-# Map -- same folium style as app.py: coastline always-on, colored by
-# CoastType, one toggleable FeatureGroup per category, LayerControl legend.
-# ------------------------------------------------------------------
-st.header("Map")
-st.caption(
-    "One dot per (track_id, gt_family) ground-truth unit, at its gt_family's nominal-track x coastline "
-    "crossing point (gt_family_crossings.parquet), colored by completeness category. Same coastline "
-    "background as the Overview page. Use the layer control (top right) to toggle categories on/off."
-)
-
-if not plottable_4326.empty:
-    minx, miny, maxx, maxy = plottable_4326.total_bounds
-else:
-    minx, miny, maxx, maxy = shoreline_4326.total_bounds
-
-m = folium.Map(location=[(miny + maxy) / 2, (minx + maxx) / 2], zoom_start=6, tiles="OpenStreetMap")
-m.fit_bounds([[miny, minx], [maxy, maxx]])
-
-# Coastline drawn directly on the map (always on, not a FeatureGroup).
-for ct, name in GEOMORPHIC_FEATURE_NAMES.items():
-    sub = shoreline_4326[shoreline_4326["CoastType"] == ct]
-    for _, row in sub.iterrows():
-        locs = _line_to_folium_locations(row.geometry)
-        if locs:
-            folium.PolyLine(locs, color=GEOMORPHIC_FEATURE_COLORS[ct], weight=3, opacity=0.9).add_to(m)
-
-# Drawn most-common-category first so rarer categories end up on top.
-cat_counts_plottable = plottable_4326["category"].value_counts()
-draw_order = sorted(CATEGORY_ORDER, key=lambda c: cat_counts_plottable.get(c, 0), reverse=True)
-
-for category in draw_order:
-    sub = plottable_4326[plottable_4326["category"] == category]
-    if sub.empty:
-        continue
-    fg = folium.FeatureGroup(name=f"{category} (n={len(sub)})", show=True)
-    for _, row in sub.iterrows():
-        pt = row["geometry"]
-        folium.CircleMarker(
-            [pt.y, pt.x], radius=6, color="white", weight=1,
-            fill=True, fill_color=CATEGORY_COLORS[category], fill_opacity=0.95,
-            tooltip=f"Track {row['track_id']} ({row['gt_family']}): {category}",
-        ).add_to(fg)
-    fg.add_to(m)
-
-folium.LayerControl(collapsed=False).add_to(m)
-
-st_folium(m, height=550, use_container_width=True, returned_objects=[], key="erosion_results_map")
