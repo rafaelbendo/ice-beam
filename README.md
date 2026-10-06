@@ -130,6 +130,26 @@ result = run_track("0129", paths, params, write_outputs=False)
 result.gie.summary_df
 ```
 
+# Terminology: paper vs. code
+
+The paper uses ICESat-2 documentation terms (Smith et al., 2019, Fig. 1), some of which have different names in the code. Names in `CAPS` are settings in `is2retreat/config.py`.
+
+| Paper term | Code term / column | Meaning |
+|---|---|---|
+| pair track | `gt_family` (`gt1`, `gt2`, `gt3`) | Line bisecting a ground-track pair (e.g. `gt1l` + `gt1r`); constant on the ground across spacecraft yaw flips |
+| ground track | `gt_name` (SlideRule's `gt`; `gt1l` … `gt3r`) | Track of one laser spot on the ground |
+| beam acquisition | `beam_id` | One ground track on one date |
+| cluster | `cluster_id` (within a `gt_family`) | Beam acquisitions along one pair track, grown inward from either side. Each is within `SIZE_LIMIT_M` (180 m) of the reference beam, there is at most one per date and at least 2 in total, and each has an elevation at `X0` within `bias_tolerance` of the reference beam |
+| bias tolerance | `bias_tolerance` (from `BIAS_TOLERANCES`) | Largest elevation difference at `X0` from the cluster's reference beam allowed for an acquisition to join a cluster or be kept |
+| bluff position | `bluff_x` | Distance from the offshore edge to the first inland crossing of the reference elevation (midpoint of the min and max elevation in the cluster's oldest acquisition) |
+| GIE-corrected position | `bluff_x_gie` | `bluff_x + NSM_geo` |
+
+The reference beam is the first beam a cluster grows from. `XM` (offshore distance used to order beams side to side) and `X0` (offshore distance where the elevation bias is measured) are separate settings, both 500 m by default.
+
+**Sign convention:** `bluff_x` increases landward, so negative NSM/EPR means retreat (erosion) and positive means advance, as in DSAS (see [Conventions](#conventions)).
+
+**Reference:** Smith, B., et al. (2019). Land ice height-retrieval algorithm for NASA's ICESat-2 photon-counting laser altimeter. *Remote Sensing of Environment*.
+
 # Output tables
 
 Each run writes six CSV tables to the output folder. The suffix is the SlideRule resolution (`_5m`). Tables ending in `_measured` describe bluff positions as detected along each beam; tables ending in `_gie` add the geometric (GIE) correction for beams that cross the coast at an angle.
