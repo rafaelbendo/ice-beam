@@ -17,6 +17,8 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Optional, Sequence
 
+DAYS_PER_YEAR = 365.25  # mean year length used for all day-to-year conversions
+
 
 @dataclass(frozen=True)
 class Params:
@@ -83,7 +85,7 @@ class Params:
     # DSAS statistics
     # ------------------------------
     CONFIDENCE: float = 0.95
-    MIN_SPAN_DAYS: int = 365
+    MIN_SPAN_YEARS: float = 1.0  # minimum time span for EPR, LRR family and U_EPR
     POSITIONAL_UNCERTAINTY_M: float = 4.8
 
     # ------------------------------

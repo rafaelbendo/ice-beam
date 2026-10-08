@@ -30,7 +30,7 @@ import geopandas as gpd
 from shapely.geometry import LineString, Point, MultiLineString, GeometryCollection
 
 from .bluff import process_cluster_with_reference
-from .config import Params
+from .config import DAYS_PER_YEAR, Params
 from .utils import first_non_null
 from .workflow import run_workflow
 
@@ -606,7 +606,7 @@ def compute_cluster_statistics_from_x(
     bluff_df: pd.DataFrame,
     x_col: str = "bluff_x",
     confidence: float = 0.95,
-    min_span_days: int = 365,
+    min_span_years: float = 1.0,
     positional_uncertainty_m: float = 4.8,
 ) -> dict:
     """
@@ -663,18 +663,18 @@ def compute_cluster_statistics_from_x(
     sce = df["position"].max() - df["position"].min()
 
     span_days = int((df["acq_date"].iloc[-1] - df["acq_date"].iloc[0]).days)
-    time_years = span_days / 365.25 if span_days > 0 else np.nan
+    span_years = span_days / DAYS_PER_YEAR if span_days > 0 else np.nan
 
     epr = (
-        nsm / time_years
-        if span_days >= min_span_days and np.isfinite(time_years) and time_years > 0
+        nsm / span_years
+        if span_years >= min_span_years and np.isfinite(span_years) and span_years > 0
         else np.nan
     )
 
     lrr = lr2 = lse = lci = np.nan
 
-    if len(df) >= 3 and span_days >= min_span_days:
-        years = df["acq_date"].map(lambda d: d.year + d.dayofyear / 365.25).to_numpy()
+    if len(df) >= 3 and span_years >= min_span_years:
+        years = df["acq_date"].map(lambda d: d.year + d.dayofyear / DAYS_PER_YEAR).to_numpy()
         xvals = df["position"].to_numpy(dtype=float)
 
         model = LinearRegression().fit(years.reshape(-1, 1), xvals)
@@ -700,8 +700,8 @@ def compute_cluster_statistics_from_x(
 
     u_nsm = np.sqrt(positional_uncertainty_m**2 + positional_uncertainty_m**2)
     u_epr = (
-        u_nsm / time_years
-        if np.isfinite(epr) and np.isfinite(time_years) and time_years >= 1
+        u_nsm / span_years
+        if np.isfinite(epr) and np.isfinite(span_years) and span_years >= min_span_years
         else np.nan
     )
 
@@ -714,8 +714,8 @@ def compute_cluster_statistics_from_x(
         "LSE": lse,
         "LCI": lci,
         "TemporalSpan_days": span_days,
-        "ClusterTemporalSpanYears": round(time_years, 2) if np.isfinite(time_years) else np.nan,
-        "ValidRegression": bool(np.isfinite(lrr) and len(df) >= 3 and span_days >= min_span_days),
+        "ClusterTemporalSpanYears": round(span_years, 2) if np.isfinite(span_years) else np.nan,
+        "ValidRegression": bool(np.isfinite(lrr) and len(df) >= 3 and span_years >= min_span_years),
         "U_position_m": positional_uncertainty_m,
         "U_NSM_m": round(float(u_nsm), 2),
         "U_EPR_myr": round(float(u_epr), 2) if np.isfinite(u_epr) else np.nan,
@@ -965,7 +965,7 @@ def run_gie_dynamic_for_bias_values(
 
                 stats_kwargs = dict(
                     confidence=params.CONFIDENCE,
-                    min_span_days=params.MIN_SPAN_DAYS,
+                    min_span_years=params.MIN_SPAN_YEARS,
                     positional_uncertainty_m=params.POSITIONAL_UNCERTAINTY_M,
                 )
                 measured_stats = compute_cluster_statistics_from_x(gie_df, x_col="bluff_x", **stats_kwargs)

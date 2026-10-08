@@ -9,11 +9,13 @@ from scipy.stats import t as student_t
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 
+from .config import DAYS_PER_YEAR
+
 
 def compute_cluster_statistics(
     bluff_df,
     confidence=0.95,
-    min_span_days=365,
+    min_span_years=1.0,
     positional_uncertainty_m=4.8,
 ):
     """
@@ -23,8 +25,8 @@ def compute_cluster_statistics(
         • x increases landward (retreat = negative)
         • NSM = first_x - last_x
         • SCE = max_x - min_x
-        • EPR = NSM / Δt_years   (requires span >= min_span_days)
-        • Regression metrics require >= 3 unique dates AND span >= min_span_days
+        • EPR = NSM / Δt_years   (requires span >= min_span_years)
+        • Regression metrics require >= 3 unique dates AND span >= min_span_years
 
     Returns
     -------
@@ -46,12 +48,12 @@ def compute_cluster_statistics(
 
     def _add_uncertainty(stats):
         span_days = stats.get("TemporalSpan_days", np.nan)
-        span_years = span_days / 365.25 if pd.notna(span_days) and span_days > 0 else np.nan
+        span_years = span_days / DAYS_PER_YEAR if pd.notna(span_days) and span_days > 0 else np.nan
 
         u_nsm = np.sqrt(positional_uncertainty_m**2 + positional_uncertainty_m**2)
         u_epr = (
             u_nsm / span_years
-            if pd.notna(stats.get("EPR", np.nan)) and pd.notna(span_years) and span_years >= 1
+            if pd.notna(stats.get("EPR", np.nan)) and pd.notna(span_years) and span_years >= min_span_years
             else np.nan
         )
 
@@ -93,14 +95,14 @@ def compute_cluster_statistics(
     SCE = float(df["bluff_x"].max() - df["bluff_x"].min())
 
     span_days = int((df["acq_date"].iloc[-1] - df["acq_date"].iloc[0]).days)
-    t_years = span_days / 365.25 if span_days > 0 else np.nan
+    span_years = span_days / DAYS_PER_YEAR if span_days > 0 else np.nan
 
-    EPR = NSM / t_years if span_days >= min_span_days and np.isfinite(t_years) and t_years > 0 else np.nan
+    EPR = NSM / span_years if span_years >= min_span_years and np.isfinite(span_years) and span_years > 0 else np.nan
 
     LRR = LR2 = LSE = LCI = np.nan
 
-    if len(df) >= 3 and span_days >= min_span_days:
-        years = df["acq_date"].map(lambda d: d.year + d.dayofyear / 365.25).to_numpy()
+    if len(df) >= 3 and span_years >= min_span_years:
+        years = df["acq_date"].map(lambda d: d.year + d.dayofyear / DAYS_PER_YEAR).to_numpy()
         xvals = df["bluff_x"].to_numpy()
 
         model = LinearRegression().fit(years.reshape(-1, 1), xvals)
@@ -134,7 +136,7 @@ def compute_cluster_statistics(
         "LSE": LSE,
         "LCI": LCI,
         "TemporalSpan_days": span_days,
-        "ValidRegression": np.isfinite(LRR) and len(df) >= 3 and span_days >= min_span_days,
+        "ValidRegression": np.isfinite(LRR) and len(df) >= 3 and span_years >= min_span_years,
     }
 
     return _add_uncertainty(result)

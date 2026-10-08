@@ -16,7 +16,7 @@ import pandas as pd
 
 from .angles import ANGLE_SUMMARY_COLS, BEAM_ANGLE_COLS
 from .bluff import process_cluster_with_reference
-from .config import Params
+from .config import DAYS_PER_YEAR, Params
 from .metrics import compute_cluster_intervals, compute_cluster_statistics
 from .utils import cluster_member_beams, first_non_null, format_track_id
 from .workflow import run_workflow
@@ -141,12 +141,12 @@ def run_dsas_for_bias_tolerance(
             stats = compute_cluster_statistics(
                 bluff_df,
                 confidence=params.CONFIDENCE,
-                min_span_days=params.MIN_SPAN_DAYS,
+                min_span_years=params.MIN_SPAN_YEARS,
                 positional_uncertainty_m=params.POSITIONAL_UNCERTAINTY_M,
             )
 
             cluster_years = (
-                round(stats["TemporalSpan_days"] / 365.25, 2)
+                round(stats["TemporalSpan_days"] / DAYS_PER_YEAR, 2)
                 if pd.notna(stats["TemporalSpan_days"])
                 else np.nan
             )

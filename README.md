@@ -179,8 +179,8 @@ DSAS-style metrics ([USGS DSAS](https://www.usgs.gov/centers/whcmsc/science/digi
 |---|---|
 | `NSM` | Net Shoreline Movement (m): first − last position |
 | `SCE` | Shoreline Change Envelope (m): max − min position |
-| `EPR` | End Point Rate (m/yr): NSM / time span; needs ≥ 365 days |
-| `LRR`, `LR2`, `LSE`, `LCI` | Linear Regression Rate (m/yr), its R², standard error (m) and 95 % confidence half-width (m/yr); need ≥ 3 dates over ≥ 365 days |
+| `EPR` | End Point Rate (m/yr): NSM / time span; needs at least one year (365.25 days) |
+| `LRR`, `LR2`, `LSE`, `LCI` | Linear Regression Rate (m/yr), its R², standard error (m) and 95 % confidence half-width (m/yr); need ≥ 3 dates over at least one year (365.25 days) |
 | `ValidRegression` | True when LRR could be computed |
 | `TemporalSpan_days`, `ClusterTemporalSpanYears`, `first_date`, `last_date` | Time covered by the cluster |
 | `U_position_m`, `U_NSM_m`, `U_EPR_myr` | Uncertainty: 4.8 m per position, √2 × 4.8 = 6.79 m for NSM, U_NSM / years for EPR |
